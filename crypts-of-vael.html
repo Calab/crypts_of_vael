@@ -1,6 +1,7 @@
 <!doctype html>
 <html lang="en">
 <head>
+<meta name="robots" content="noindex, nofollow">
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Crypts of Vael</title>
@@ -55,7 +56,7 @@ const titleFont = px => Math.round(px * TITLE_FONT_SCALE) + 'px ' + TITLE_FONT;
 // Canvas text alone doesn't make the browser download a web font, so ask for both up front.
 // Until they arrive (or if the files are missing) the text falls back to Courier New.
 if (document.fonts) for (const f of ['16px "Foul Fiend"', '16px "Swinging Wake"']) document.fonts.load(f).catch(() => {});
-const VERSION = '1.0.0';               // shown in the lower right of the title page
+const VERSION = '1.0.1';               // shown in the lower right of the title page
 const W = 800, H = 500, VH = 440;   // logical drawing size; the canvas is scaled to fit the window
 let SCALE = 1;
 const MIN_W = 640;                    // smallest game width (640x400 drawing area + text = about 640x480)
