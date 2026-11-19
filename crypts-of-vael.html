@@ -36,6 +36,7 @@
 "use strict";
 // ---------- setup ----------
 const cv = document.getElementById('cv'), ctx = cv.getContext('2d');
+const VERSION = '1.0.0';               // shown in the lower right of the title page
 const W = 800, H = 500, VH = 440;   // logical drawing size; the canvas is scaled to fit the window
 let SCALE = 1;
 const MIN_W = 640;                    // smallest game width (640x400 drawing area + text = about 640x480)
@@ -1493,6 +1494,8 @@ function renderTitle(now) {
   drawPolys(SHAPE.wraith(now), CX, 455, 92, 0.9, true, RGB.mon);
   ctx.fillStyle = col(0.5 + 0.5 * Math.sin(now / 300));
   ctx.fillText('PRESS ENTER TO BEGIN', CX, 488);
+  ctx.textAlign = 'right'; ctx.font = '13px "Courier New",monospace'; ctx.fillStyle = col(0.5);
+  ctx.fillText('V' + VERSION, W - 10, H - 10);
 }
 function render(now) {
   ctx.setTransform(SCALE, 0, 0, SCALE, 0, 0);
