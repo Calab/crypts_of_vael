@@ -573,7 +573,7 @@ function exec(line) {
   const t = line.trim().toUpperCase().split(/\s+/).filter(Boolean);
   if (!t.length) return;
   if (G.paused) {                                   // any command un-pauses; a bare PAUSE just resumes
-    G.paused = false; msg('GAME RESUMED.');
+    resumeGame(); msg('GAME RESUMED.');
     if (matchWord(t[0], VERBS) === 'PAUSE') return;
   }
   if (G.fainted) { msg('YOU ARE UNCONSCIOUS...'); return; }
@@ -698,7 +698,7 @@ function exec(line) {
       G.pending = { quit: true };
       msg('QUIT THIS GAME AND RETURN TO THE TITLE? UNSAVED PROGRESS WILL BE LOST. (Y/N)');
       break;
-    case 'PAUSE': G.paused = true; fadeMusicOut(); msg('GAME PAUSED. ENTER ANY COMMAND TO RESUME.'); break;
+    case 'PAUSE': pauseGame(false); msg('GAME PAUSED. ENTER ANY COMMAND TO RESUME.'); break;
     case 'SAVE': saveGame(); break;
     case 'LOAD': loadGame(); break;
     case 'X': testKill(); break;
@@ -886,6 +886,27 @@ function lightRange() {
   if (!G.light) return 1;
   return Math.max(1, Math.ceil(G.light.range * Math.min(1, G.light.rem / 45)));
 }
+// ---------- pausing ----------
+// PAUSE, or switching to another browser tab, freezes the game. `auto` marks a pause made by leaving the
+// tab, which ends by itself when you come back; a PAUSE you typed waits for your next command.
+function pauseGame(auto) {
+  G.paused = true; G.autoPaused = auto; G.pausedAt = performance.now();
+  fadeMusicOut();
+}
+// Timers are stored as clock times, so push them all forward by the time spent paused. Otherwise every
+// monster would be overdue and act the instant play resumes.
+function resumeGame() {
+  const gap = Math.max(0, performance.now() - (G.pausedAt || performance.now()));
+  G.paused = false; G.autoPaused = false; G.pausedAt = 0;
+  for (const m of G.L.mons) { m.nextMove += gap; m.nextAtk += gap; if (m.nextCry) m.nextCry += gap; }
+  for (const k of ['lastHurt', 'lastMove', 'nextBeat', 'nextWarn', 'nextSound']) if (G[k]) G[k] += gap;
+  G.atkReady = G.atkReady.map(t => t + gap);
+}
+document.addEventListener('visibilitychange', () => {
+  if (!G || G.state !== 'play') return;
+  if (document.hidden) { if (!G.paused) { pauseGame(true); msg('GAME PAUSED WHILE YOU ARE AWAY.'); } }
+  else if (G.paused && G.autoPaused) { resumeGame(); msg('WELCOME BACK. GAME RESUMED.'); }
+});
 let lastT = 0;
 function update(now) {
   const dt = Math.max(0, Math.min(100, now - (lastT || now))); lastT = now;
