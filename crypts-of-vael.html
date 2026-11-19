@@ -295,7 +295,7 @@ function musicNote(a, midi, dur, type, vol, t) {
 }
 function inCombat() {
   if (!G || G.state !== 'play') return false;
-  if (gameNow() - G.lastHurt < 4000) return true;
+  if (gameNow() - G.lastStruck < 4000) return true;
   const S = G.L.S, pd = G.pdist;
   return G.L.mons.some(m => !m.dormant && pd[m.y * S + m.x] <= 2);
 }
@@ -573,7 +573,7 @@ function newGame(seed) {
   stopMusic(); musicState = null;
   lastSeed = seed;
   G = { seed, fatigue: 0, strain: 0, lastMove: 0, nextWarn: 0, state: 'play', lvl: 1, hp: 100, maxhp: 100, hands: [null, null], pack: [makeItem('torch'), makeItem('map')],
-        light: null, view: 'main', lastHurt: 0, atkReady: [0, 0], flash: 0, swing: null, strike: null,
+        light: null, view: 'main', lastHurt: 0, lastStruck: 0, atkReady: [0, 0], flash: 0, swing: null, strike: null,
         nextBeat: 0, beatT: 0, nextSound: 0, last: '', kills: 0, xp: 0, lastRank: 0, playMs: 0, levels: {} };
   enterLevel(1);
   G.L.items.push({ x: 1, y: 1, it: makeItem('dagger') });
@@ -630,7 +630,7 @@ function loadGame() {
   G.L = G.levels[G.lvl];
   G.pdist = bfs(G.L, G.p.x, G.p.y);
   const now = gameNow();           // rebuild timing afresh so nothing is stuck in the past
-  Object.assign(G, { lastMove: 0, lastHurt: 0, nextWarn: 0, nextBeat: 0, beatT: now, nextSound: 0,
+  Object.assign(G, { lastMove: 0, lastHurt: 0, lastStruck: 0, nextWarn: 0, nextBeat: 0, beatT: now, nextSound: 0,
     atkReady: [0, 0], flash: 0, swing: null, strike: null, anim: null, fatigue: 0, strain: 0, regen: 0,
     pending: null, fainted: false, view: 'main', state: 'play' });
   for (const n in G.levels) for (const m of G.levels[n].mons) {
@@ -805,7 +805,7 @@ function exec(line) {
     case 'SLEEP': {
       const n = /^\d+$/.test(t[1] || '') ? +t[1] : 0;
       if (n < 1 || n > SLEEP_MAX) msg('SLEEP HOW LONG? TYPE SLEEP 1 TO SLEEP ' + SLEEP_MAX + '.');
-      else if (monsterBeside() || gameNow() - G.lastHurt < 4000) msg('YOU CANNOT SLEEP WITH ENEMIES SO CLOSE!');
+      else if (monsterBeside() || gameNow() - G.lastStruck < 4000) msg('YOU CANNOT SLEEP WITH ENEMIES SO CLOSE!');
       else startSleep(n);
       break;
     }
@@ -1109,7 +1109,7 @@ function resumeGame() {
   const gap = Math.max(0, gameNow() - (G.pausedAt || gameNow()));
   G.paused = false; G.autoPaused = false; G.pausedAt = 0;
   for (const m of G.L.mons) { m.nextMove += gap; m.nextAtk += gap; if (m.nextCry) m.nextCry += gap; }
-  for (const k of ['lastHurt', 'lastMove', 'nextBeat', 'nextWarn', 'nextSound']) if (G[k]) G[k] += gap;
+  for (const k of ['lastHurt', 'lastStruck', 'lastMove', 'nextBeat', 'nextWarn', 'nextSound']) if (G[k]) G[k] += gap;
   G.atkReady = G.atkReady.map(t => t + gap);
 }
 document.addEventListener('visibilitychange', () => {
@@ -1199,7 +1199,7 @@ function monsterAttack(m) {
   let d = rnd(m.dmg[0], m.dmg[1]);
   const block = Math.max(...G.hands.map(it => it && it.type === 'shield' ? it.block : 0));
   if (block && rel === 0) { d = Math.max(1, Math.round(d * (1 - block))); G.strike.res = 'block'; }
-  G.hp -= d; G.lastHurt = gameNow(); G.flash = G.lastHurt + 160; SFX.hurt();
+  G.hp -= d; G.lastHurt = G.lastStruck = gameNow(); G.flash = G.lastHurt + 160; SFX.hurt();
   msg((rel === 0 ? 'THE ' + m.name : 'SOMETHING') + ' STRIKES' + where + '!' + (block && rel === 0 ? ' (BLOCKED SOME)' : ''));
   if (G.hp <= 0) die(null, 'SLAIN BY THE ' + m.name); else checkFaint();
 }
