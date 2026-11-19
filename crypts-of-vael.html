@@ -107,6 +107,10 @@ function R(z) { const k = fz(z); return { l: CX - HW * k, r: CX + HW * k, t: CY 
 function col(a, c = FG) { return `rgba(${c[0]},${c[1]},${c[2]},${a})`; }
 
 // ---------- audio ----------
+// The game clock. SLEEP moves it forward (clockSkew) to skip time; everything reads gameNow().
+let clockSkew = 0;
+const gameNow = () => performance.now() + clockSkew;
+let simulating = false, simLog = [];   // true while SLEEP fast-forwards: no sounds, messages are held back
 let AC = null;
 let soundVol = 6, lastSoundVol = 6;   // sound-effect volume 0 (off) .. 9 (loudest); 6 is the original loudness
 let musicVol = 7, lastMusicVol = 7;   // music volume 0 (off) .. 9 (loudest)
@@ -124,7 +128,7 @@ function ac() {
   return AC;
 }
 function tone(freq, dur, type = 'sine', vol = 0.2, slide = 0, delay = 0) {
-  if (soundVol <= 0) return; const a = ac(); if (!a) return;
+  if (simulating || soundVol <= 0) return; const a = ac(); if (!a) return;
   const t0 = a.currentTime + delay, o = a.createOscillator(), g = a.createGain();
   o.type = type; o.frequency.setValueAtTime(freq, t0);
   if (slide) o.frequency.exponentialRampToValueAtTime(Math.max(20, freq * slide), t0 + dur);
@@ -138,7 +142,7 @@ let musicNodes = [];
 function stopMusic() { for (const o of musicNodes) { try { o.stop(); } catch (e) { /* already stopped */ } } musicNodes = []; }
 function playTune(voices, bpm) {
   stopMusic();
-  if (soundVol <= 0) return;
+  if (simulating || soundVol <= 0) return;
   const a = ac(); if (!a) return;
   const beat = 60 / bpm, start = a.currentTime + 0.4;
   for (const { notes, wave, vol } of voices) {
@@ -203,7 +207,7 @@ function musicNote(a, midi, dur, type, vol, t) {
 }
 function inCombat() {
   if (!G || G.state !== 'play') return false;
-  if (performance.now() - G.lastHurt < 4000) return true;
+  if (gameNow() - G.lastHurt < 4000) return true;
   const S = G.L.S, pd = G.pdist;
   return G.L.mons.some(m => !m.dormant && pd[m.y * S + m.x] <= 2);
 }
@@ -314,7 +318,7 @@ function cryPan(m) {
   return Math.max(-1, Math.min(1, right / (Math.abs(right) + Math.abs(fwd) + 0.5)));
 }
 function monsterCry(m, level) {
-  if (soundVol <= 0 || level <= 0) return;
+  if (simulating || soundVol <= 0 || level <= 0) return;
   const a = ac(); if (!a) return;
   const out = a.createGain(); out.gain.value = 0.5 * level * CRY_GAIN[m.k];
   if (a.createStereoPanner) { const p = a.createStereoPanner(); p.pan.value = cryPan(m); out.connect(p).connect(sfxBus(a)); }
@@ -533,7 +537,7 @@ function loadGame() {
   G = d;
   G.L = G.levels[G.lvl];
   G.pdist = bfs(G.L, G.p.x, G.p.y);
-  const now = performance.now();           // rebuild timing afresh so nothing is stuck in the past
+  const now = gameNow();           // rebuild timing afresh so nothing is stuck in the past
   Object.assign(G, { lastMove: 0, lastHurt: 0, nextWarn: 0, nextBeat: 0, beatT: now, nextSound: 0,
     atkReady: [0, 0], flash: 0, swing: null, anim: null, fatigue: 0, strain: 0, regen: 0,
     pending: null, fainted: false, view: 'main', state: 'play' });
@@ -546,7 +550,7 @@ function loadGame() {
 // ---------- messages ----------
 const logEl = document.getElementById('log');
 let logLines = [];
-function msg(s) { logLines.push(s); if (logLines.length > 6) logLines.shift(); drawLog(); }
+function msg(s) { if (simulating) { simLog.push(s); return; } logLines.push(s); if (logLines.length > 6) logLines.shift(); drawLog(); }
 function logClear() { logLines = []; drawLog(); }
 function drawLog() {
   logEl.innerHTML = '';
@@ -554,7 +558,7 @@ function drawLog() {
 }
 
 // ---------- commands ----------
-const VERBS = ['MOVE', 'REVEAL', 'TURN', 'ATTACK', 'GET', 'DROP', 'STOW', 'PULL', 'USE', 'LOOK', 'EXAMINE', 'DESCEND', 'ASCEND', 'SAVE', 'LOAD', 'PAUSE', 'QUIT', 'HELP', 'SOUND', 'MUSIC', 'SEED', 'ANIMATE', 'X'];
+const VERBS = ['MOVE', 'REVEAL', 'TURN', 'ATTACK', 'GET', 'DROP', 'STOW', 'PULL', 'USE', 'LOOK', 'EXAMINE', 'DESCEND', 'ASCEND', 'SAVE', 'LOAD', 'PAUSE', 'QUIT', 'SLEEP', 'HELP', 'SOUND', 'MUSIC', 'SEED', 'ANIMATE', 'X'];
 // These commands must be typed in full, so a stray letter can't open the test map views.
 const FULL_WORD_ONLY = ['REVEAL', 'QUIT'];
 function matchWord(tok, list) { return list.find(w => FULL_WORD_ONLY.includes(w) ? w === tok : w.startsWith(tok)); }
@@ -577,6 +581,7 @@ function exec(line) {
     if (matchWord(t[0], VERBS) === 'PAUSE') return;
   }
   if (G.fainted) { msg('YOU ARE UNCONSCIOUS...'); return; }
+  if (G.sleep) { msg('YOU ARE ASLEEP...'); return; }
   // Waiting for an answer to "quit this game?"
   if (G.pending && G.pending.quit) {
     if ('YES'.startsWith(t[0])) quitToTitle();
@@ -622,7 +627,7 @@ function exec(line) {
       else if (h === 1) { G.p.dir = (G.p.dir + 1) % 4; sign = 1; }
       else { msg('TURN LEFT, RIGHT OR AROUND?'); return; }
       const steps = (G.p.dir - fromDir + 4) % 4 === 2 ? 2 : 1;   // turning around = two quarter turns
-      G.anim = { type: 'turn', fromDir, sign, steps, t0: performance.now(), dur: TURN_MS * steps };
+      G.anim = { type: 'turn', fromDir, sign, steps, t0: gameNow(), dur: TURN_MS * steps };
       mapSafeView(); break;
     }
     case 'ATTACK': if (needHand()) return; attack(h); break;
@@ -694,6 +699,13 @@ function exec(line) {
       msg('YOU CLIMB UP TO DEPTH ' + G.lvl + '.');
       break;
     }
+    case 'SLEEP': {
+      const n = /^\d+$/.test(t[1] || '') ? +t[1] : 0;
+      if (n < 1 || n > SLEEP_MAX) msg('SLEEP HOW LONG? TYPE SLEEP 1 TO SLEEP ' + SLEEP_MAX + '.');
+      else if (monsterBeside() || gameNow() - G.lastHurt < 4000) msg('YOU CANNOT SLEEP WITH ENEMIES SO CLOSE!');
+      else startSleep(n);
+      break;
+    }
     case 'QUIT':
       G.pending = { quit: true };
       msg('QUIT THIS GAME AND RETURN TO THE TITLE? UNSAVED PROGRESS WILL BE LOST. (Y/N)');
@@ -738,7 +750,7 @@ function exec(line) {
       msg('MOVE [BACK|LEFT|RIGHT]   TURN LEFT|RIGHT|AROUND   ATTACK L|R   DESCEND  ASCEND');
       msg('GET L|R [ITEM]  DROP L|R  STOW L|R  PULL L|R ITEM  USE L|R|ITEM');
       msg('USE MAP SHOWS WHERE YOU HAVE BEEN (YOU START WITH A MAP IN YOUR PACK).');
-      msg('SAVE  LOAD  PAUSE  QUIT  EXAMINE (PACK)  LOOK  SEED  SOUND [0-9]  MUSIC [0-9]  ANIMATE.  WORDS MAY BE ABBREVIATED.');
+      msg('SLEEP [1-20]  SAVE  LOAD  PAUSE  QUIT  EXAMINE (PACK)  LOOK  SEED  SOUND [0-9]  MUSIC [0-9]  ANIMATE.  WORDS MAY BE ABBREVIATED.');
       msg('EVERY STEP TIRES YOU; HURRYING TIRES YOU MORE. STAND STILL TO RECOVER.');
       break;
   }
@@ -759,7 +771,7 @@ function move(d) {
   const nx = G.p.x + DX[d], ny = G.p.y + DY[d];
   if (isWall(nx, ny)) {
     // walking into stone hurts
-    const now = performance.now(), d = rnd(2, 4);
+    const now = gameNow(), d = rnd(2, 4);
     SFX.thud(); G.flash = now + 120; G.hp -= d; G.lastHurt = now;
     if (G.hp <= 0) { die('YOU DASH YOURSELF AGAINST THE STONE.'); return; }
     checkFaint();
@@ -767,7 +779,7 @@ function move(d) {
     return;
   }
   const m = monAt(nx, ny);                          // monsters don't block: you can share their square
-  const now = performance.now();
+  const now = gameNow();
   if (now - G.lastMove < 120) return;          // can't move faster than ~8 steps/second
   G.lastMove = now;
   exert(now);
@@ -836,7 +848,7 @@ function use(h) {
 }
 function usePack(i) { applyUse(G.pack[i], () => { G.pack.splice(i, 1); }); }
 function attack(h) {
-  const now = performance.now();
+  const now = gameNow();
   if (now < G.atkReady[h]) { msg('YOUR ARM IS NOT READY.'); return; }
   const it = G.hands[h];
   let dmg = [1, 3], hit = 0.85, cd = 650;
@@ -869,7 +881,7 @@ function testKill() {
   const front = monAt(G.p.x, G.p.y) || monAt(G.p.x + DX[G.p.dir], G.p.y + DY[G.p.dir]);
   const m = front || [0, 1, 2, 3].map(d => monAt(G.p.x + DX[d], G.p.y + DY[d])).find(Boolean);
   if (!m) { msg('X: NO MONSTER NEXT TO YOU.'); return; }
-  G.swing = { t: performance.now(), h: 1, it: G.hands[1] }; mapSafeView();
+  G.swing = { t: gameNow(), h: 1, it: G.hands[1] }; mapSafeView();
   killMonster(m);
 }
 // Ends the current game early and goes back to the title screen. A SAVEd game is kept.
@@ -886,17 +898,77 @@ function lightRange() {
   if (!G.light) return 1;
   return Math.max(1, Math.ceil(G.light.range * Math.min(1, G.light.rem / 45)));
 }
+// ---------- sleeping ----------
+// SLEEP n skips n "moves" of game time. The screen fades to black, and while it is dark the game is run
+// forward in small steps exactly as if that time had passed (healing, light burning, monsters roaming),
+// with sound and music off and messages held back; then the screen fades back in. A monster stepping
+// next to you (or onto your square) wakes you at once and the screen snaps straight back on.
+const SLEEP_MAX = 20, SLEEP_MOVE_MS = 5000, SLEEP_STEP_MS = 50;
+const SLEEP_FADE_MS = 500, SLEEP_DARK_MS = 1000;            // fade out, dark (time passes), fade in: 2 s
+// A hostile monster beside you (one step away by an open path) or in your square.
+function monsterBeside() {
+  const S = G.L.S, pd = G.pdist;
+  return G.L.mons.find(m => !m.dormant && pd[m.y * S + m.x] >= 0 && pd[m.y * S + m.x] <= 1);
+}
+function startSleep(n) {
+  G.anim = null; G.swing = null; G.view = 'main';
+  G.sleep = { n, r0: performance.now(), total: n * SLEEP_MOVE_MS, simmed: 0, hp0: G.hp, light0: G.light, hurt0: G.lastHurt };
+  fadeMusicOut();
+}
+// Called from update() every frame while asleep. Uses the real clock, so the sequence always takes 2 s.
+function sleepTick() {
+  const S = G.sleep, e = performance.now() - S.r0;
+  if (e >= SLEEP_FADE_MS && S.simmed < S.total) {
+    // while dark, run the game forward in proportion to how much of the dark time has passed
+    const target = Math.min(1, (e - SLEEP_FADE_MS) / SLEEP_DARK_MS) * S.total;
+    simulating = true;
+    try {
+      while (S.simmed < target) {
+        clockSkew += SLEEP_STEP_MS; S.simmed += SLEEP_STEP_MS;
+        update(gameNow());
+        if (G.state !== 'play') { endSleep('dead'); return; }
+        const m = monsterBeside();
+        if (m || G.lastHurt !== S.hurt0) { endSleep('woken', m); return; }
+      }
+    } finally { simulating = false; }
+  }
+  if (e >= SLEEP_FADE_MS * 2 + SLEEP_DARK_MS) endSleep(null);
+}
+function endSleep(why, m) {
+  const S = G.sleep; G.sleep = null;              // no overlay any more: the screen is back on at once
+  simulating = false;
+  if (why === 'dead') { msg('YOU NEVER WAKE.'); simLog.slice(-3).forEach(msg); simLog = []; TUNES.death(); return; }
+  const slept = Math.max(1, Math.round(S.simmed / SLEEP_MOVE_MS));
+  if (why === 'woken') {
+    SFX.hurt();
+    msg('YOU ARE JOLTED AWAKE AFTER ' + slept + (slept === 1 ? ' MOVE!' : ' MOVES!'));
+    const blow = simLog.filter(s => s.includes('STRIKES')).pop();
+    msg(blow || (m ? 'THE ' + m.name + ' IS RIGHT BESIDE YOU!' : 'SOMETHING IS RIGHT BESIDE YOU!'));
+  } else msg('YOU WAKE AFTER ' + S.n + (S.n === 1 ? ' MOVE.' : ' MOVES.'));
+  simLog = [];
+  msg('HEALTH ' + Math.max(0, S.hp0) + ' -> ' + G.hp + '.');
+  if (S.light0 && !G.light) msg('YOUR ' + S.light0.name + ' BURNED OUT WHILE YOU SLEPT.');
+  if (G.fainted) msg('YOU ARE STILL TOO WEAK TO STAND...');
+}
+// How dark the sleep overlay is right now (0 = none, 1 = black).
+function sleepDarkness() {
+  if (!G.sleep) return 0;
+  const e = performance.now() - G.sleep.r0;
+  if (e < SLEEP_FADE_MS) return e / SLEEP_FADE_MS;
+  if (e < SLEEP_FADE_MS + SLEEP_DARK_MS) return 1;
+  return Math.max(0, 1 - (e - SLEEP_FADE_MS - SLEEP_DARK_MS) / SLEEP_FADE_MS);
+}
 // ---------- pausing ----------
 // PAUSE, or switching to another browser tab, freezes the game. `auto` marks a pause made by leaving the
 // tab, which ends by itself when you come back; a PAUSE you typed waits for your next command.
 function pauseGame(auto) {
-  G.paused = true; G.autoPaused = auto; G.pausedAt = performance.now();
+  G.paused = true; G.autoPaused = auto; G.pausedAt = gameNow();
   fadeMusicOut();
 }
 // Timers are stored as clock times, so push them all forward by the time spent paused. Otherwise every
 // monster would be overdue and act the instant play resumes.
 function resumeGame() {
-  const gap = Math.max(0, performance.now() - (G.pausedAt || performance.now()));
+  const gap = Math.max(0, gameNow() - (G.pausedAt || gameNow()));
   G.paused = false; G.autoPaused = false; G.pausedAt = 0;
   for (const m of G.L.mons) { m.nextMove += gap; m.nextAtk += gap; if (m.nextCry) m.nextCry += gap; }
   for (const k of ['lastHurt', 'lastMove', 'nextBeat', 'nextWarn', 'nextSound']) if (G[k]) G[k] += gap;
@@ -912,7 +984,8 @@ function update(now) {
   const dt = Math.max(0, Math.min(100, now - (lastT || now))); lastT = now;
   if (G.state !== 'play' || G.pending) return;   // paused while asking about a new seed
   if (G.paused) { musicState = null; return; }   // frozen by the PAUSE command
-  musicTick();
+  if (G.sleep && !simulating) { musicState = null; sleepTick(); return; }   // asleep: see sleepTick
+  if (!simulating) musicTick();
   markSeen();
   // heartbeat
   const ratio = Math.max(0.02, G.hp / G.maxhp);
@@ -977,7 +1050,7 @@ function update(now) {
 }
 function monsterAttack(m) {
   monsterCry(m, 1);                                  // full-volume cry as it attacks
-  m.nextCry = performance.now() + m.cry;
+  m.nextCry = gameNow() + m.cry;
   const rel = m.x === G.p.x && m.y === G.p.y ? 0 : (dirTo(m) - G.p.dir + 4) % 4;   // same square counts as in front
   const where = ['', ' FROM YOUR RIGHT', ' FROM BEHIND', ' FROM YOUR LEFT'][rel];
   if (Math.random() > m.hit) { msg('THE ' + m.name + ' LUNGES' + where + ' AND MISSES.'); return; }
@@ -985,7 +1058,7 @@ function monsterAttack(m) {
   let d = rnd(m.dmg[0], m.dmg[1]);
   const block = Math.max(...G.hands.map(it => it && it.type === 'shield' ? it.block : 0));
   if (block && rel === 0) d = Math.max(1, Math.round(d * (1 - block)));
-  G.hp -= d; G.lastHurt = performance.now(); G.flash = G.lastHurt + 160; SFX.hurt();
+  G.hp -= d; G.lastHurt = gameNow(); G.flash = G.lastHurt + 160; SFX.hurt();
   msg((rel === 0 ? 'THE ' + m.name : 'SOMETHING') + ' STRIKES' + where + '!' + (block && rel === 0 ? ' (BLOCKED SOME)' : ''));
   if (G.hp <= 0) die(); else checkFaint();
 }
@@ -1655,8 +1728,10 @@ function render(now) {
   }
   ctx.restore();
   renderStatus(now);
+  const dark = sleepDarkness();                     // SLEEP: fade the whole screen to black and back
+  if (dark > 0) { ctx.fillStyle = 'rgba(0,0,0,' + dark + ')'; ctx.fillRect(0, 0, W, H); }
 }
-function loop(now) { if (G) update(now); render(now); requestAnimationFrame(loop); }
+function loop(t) { const now = t + clockSkew; if (G) update(now); render(now); requestAnimationFrame(loop); }
 resize();
 requestAnimationFrame(loop);
 
