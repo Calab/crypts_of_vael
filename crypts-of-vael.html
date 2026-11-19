@@ -732,7 +732,7 @@ function exec(line) {
       const here = itemsAt(G.p.x, G.p.y).filter(o => itemMatches(o.it, words));
       if (!here.length) {
         const ax = G.p.x + DX[G.p.dir], ay = G.p.y + DY[G.p.dir], m = monAt(ax, ay);
-        const guarded = m && (itemsAt(ax, ay).some(o => itemMatches(o.it, words)) || (m.carry && itemMatches(m.carry, words)));
+        const guarded = m && itemsAt(ax, ay).some(o => itemMatches(o.it, words));   // what a monster carries stays hidden
         msg(guarded ? 'THE ' + m.name + ' GUARDS IT. KILL IT FIRST.' : 'NOTHING LIKE THAT HERE.');
         return;
       }
@@ -1571,7 +1571,6 @@ function renderMain(now, P = G.p, shift = 0) {
       const jx = now < m.hurt ? (Math.random() - 0.5) * 12 : 0;
       ctx.lineWidth = now < m.hurt ? 3 : 2;
       drawPolys(SHAPE[m.k](now + m.ph * 1000), CX + jx, CY + HH * k, s, G.light ? a : 0.35, true, RGB.mon);
-      if (m.carry && G.light) drawPolys(ICON[m.carry.kind](now), CX + jx + s * 0.95, CY + HH * k - s * 0.45, s * 0.5, a, true, RGB.item);
       ctx.lineWidth = 2;
     }
     // a monster standing in a side tunnel beside this cell peeks through the doorway
