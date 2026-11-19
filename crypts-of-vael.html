@@ -114,6 +114,21 @@ let simulating = false, simLog = [];   // true while SLEEP fast-forwards: no sou
 let AC = null;
 let soundVol = 6, lastSoundVol = 6;   // sound-effect volume 0 (off) .. 9 (loudest); 6 is the original loudness
 let musicVol = 7, lastMusicVol = 7;   // music volume 0 (off) .. 9 (loudest)
+// Both volumes (and the level each returns to when switched back on) are remembered in the browser,
+// so they survive reloading the page.
+const VOL_KEY = 'vael-volume';
+try {
+  const v = JSON.parse(localStorage.getItem(VOL_KEY) || 'null'), ok = n => Number.isInteger(n) && n >= 0 && n <= 9;
+  if (v) {
+    if (ok(v.sound)) soundVol = v.sound;
+    if (ok(v.music)) musicVol = v.music;
+    if (ok(v.lastSound) && v.lastSound > 0) lastSoundVol = v.lastSound;
+    if (ok(v.lastMusic) && v.lastMusic > 0) lastMusicVol = v.lastMusic;
+  }
+} catch (e) { /* storage unavailable or corrupt: keep the defaults */ }
+function saveVolumes() {
+  try { localStorage.setItem(VOL_KEY, JSON.stringify({ sound: soundVol, music: musicVol, lastSound: lastSoundVol, lastMusic: lastMusicVol })); } catch (e) { /* ignore */ }
+}
 const musicGainFor = v => Math.max(0, v) / 9 * 1.5;
 const sfxGainFor = v => Math.max(0, v) / 6;      // 6 = unchanged, 9 = 1.5x
 let sfxGain = null;
@@ -235,7 +250,7 @@ function fadeMusicOut() { if (AC && musicGain) musicGain.gain.setTargetAtTime(0.
 // Every monster type has its own synthesised cry. Volume falls off with path distance through the maze,
 // and the sound is panned left/right according to where the monster is relative to the way you face.
 const HEAR_RANGE = 22;
-const CRY_GAIN = { mould: 1.5, crawler: 2, hound: 2.1, toad: 2, wraith: 1, golem: 0.75, king: 2.3 };   // evens out loudness
+const CRY_GAIN = { mould: 1.5, crawler: 2, hound: 2.1, skeleton: 1.6, wraith: 1, golem: 0.75, king: 2.3 };   // evens out loudness
 let NOISE = null;
 function noiseBuf(a) {
   if (!NOISE) {
@@ -278,12 +293,16 @@ const CRIES = {
     const o = vOsc(a, out, 'sawtooth', 95, t + 0.85, 0.45, 0.3, 0.05);
     o.frequency.linearRampToValueAtTime(125, t + 1.0); o.frequency.linearRampToValueAtTime(85, t + 1.3);
   },
-  toad(a, out, t) {               // two wobbling croaks
+  skeleton(a, out, t) {           // a dry rattle of loose bones, then a hollow clack of the jaw
+    for (let i = 0; i < 9; i++) {
+      const st = t + i * 0.05 + Math.random() * 0.03;
+      vNoise(a, out, st, 0.03, 0.8, 1400 + Math.random() * 1400, 7, 0.002);
+      vOsc(a, out, 'triangle', 600 + Math.random() * 500, st, 0.03, 0.12, 0.002);
+    }
     for (let i = 0; i < 2; i++) {
-      const st = t + i * 0.42, o = vOsc(a, out, 'square', 80, st, 0.3, 0.3, 0.02);
-      o.frequency.exponentialRampToValueAtTime(55, st + 0.3);
-      const lfo = a.createOscillator(), lg = a.createGain();
-      lfo.frequency.value = 28; lg.gain.value = 25; lfo.connect(lg).connect(o.frequency); lfo.start(st); lfo.stop(st + 0.35);
+      const st = t + 0.6 + i * 0.16;
+      vOsc(a, out, 'square', 240, st, 0.05, 0.18, 0.002);
+      vNoise(a, out, st, 0.05, 0.6, 900, 5, 0.002);
     }
   },
   wraith(a, out, t) {             // rising then falling moan with breathy air
@@ -358,16 +377,16 @@ const ITEMS = {
 const MON = {   // listed weakest to strongest (seed 0 shows them in this order)
   mould:   { name: 'SLIME MOULD', hp: 8, dmg: [1, 3], atk: 2200, move: 1900, hit: 0.6, cry: 1600, sound: 'A WET SQUELCH' },
   crawler: { name: 'GLOOMCRAWLER', hp: 16, dmg: [2, 5], atk: 1700, move: 950, hit: 0.7, cry: 1300, sound: 'SKITTERING' },
-  toad:    { name: 'MIRE TOAD', hp: 24, dmg: [3, 7], atk: 1300, move: 1450, hit: 0.72, cry: 1700, sound: 'A WET CROAK' },
+  skeleton:{ name: 'SKELETON', hp: 24, dmg: [3, 7], atk: 1300, move: 1450, hit: 0.72, cry: 1700, sound: 'RATTLING BONES' },
   hound:   { name: 'BONE HOUND', hp: 42, dmg: [4, 9], atk: 2000, move: 600, hit: 0.75, cry: 1100, sound: 'RASPING BREATH' },
   wraith:  { name: 'ASH WRAITH', hp: 38, dmg: [6, 11], atk: 1500, move: 800, hit: 0.8, cry: 2000, sound: 'A HOLLOW MOAN' },
   golem:   { name: 'IRON GOLEM', hp: 80, dmg: [8, 15], atk: 2200, move: 1600, hit: 0.75, cry: 1500, sound: 'GRINDING IRON' },
   king:    { name: 'HOLLOW KING', hp: 210, dmg: [10, 18], atk: 1600, move: 1000, hit: 0.8, cry: 2400, sound: 'A COLD LAUGH' },
 };
 const LEVELS = [
-  { mons: { mould: 4, crawler: 4, toad: 2 }, items: ['axe', 'buckler', 'torch', 'torch', 'mending', 'relic'] },
-  { mons: { mould: 2, crawler: 3, toad: 3, hound: 2 }, items: ['sword', 'torch', 'lantern', 'mending', 'vigor', 'relic'] },
-  { mons: { toad: 3, hound: 3, wraith: 2 }, items: ['hammer', 'tower', 'lantern', 'mending', 'mending', 'relic'] },
+  { mons: { mould: 4, crawler: 4, skeleton: 2 }, items: ['axe', 'buckler', 'torch', 'torch', 'mending', 'relic'] },
+  { mons: { mould: 2, crawler: 3, skeleton: 3, hound: 2 }, items: ['sword', 'torch', 'lantern', 'mending', 'vigor', 'relic'] },
+  { mons: { skeleton: 3, hound: 3, wraith: 2 }, items: ['hammer', 'tower', 'lantern', 'mending', 'mending', 'relic'] },
   { mons: { hound: 2, wraith: 3, golem: 2 }, items: ['rune', 'lantern', 'mending', 'vigor', 'relic'] },
   { mons: { wraith: 2, golem: 3 }, items: ['lantern', 'mending', 'mending', 'relic'], boss: 'king' },
 ];
@@ -541,7 +560,9 @@ function loadGame() {
   Object.assign(G, { lastMove: 0, lastHurt: 0, nextWarn: 0, nextBeat: 0, beatT: now, nextSound: 0,
     atkReady: [0, 0], flash: 0, swing: null, anim: null, fatigue: 0, strain: 0, regen: 0,
     pending: null, fainted: false, view: 'main', state: 'play' });
-  for (const n in G.levels) for (const m of G.levels[n].mons) { m.nextMove = 0; m.nextAtk = 0; m.nextCry = 0; m.hurt = 0; }
+  for (const n in G.levels) for (const m of G.levels[n].mons) {
+    if (m.k === 'toad') Object.assign(m, { k: 'skeleton', name: MON.skeleton.name, sound: MON.skeleton.sound, cry: MON.skeleton.cry });   // saves from before the toad was replaced
+    m.nextMove = 0; m.nextAtk = 0; m.nextCry = 0; m.hurt = 0; }
   logClear();
   msg('GAME LOADED - DEPTH ' + G.lvl + ', ' + Math.max(0, G.hp) + '/' + G.maxhp + ' HEALTH, RANK ' + xpRank() + '.');
   cmd.placeholder = '';
@@ -730,6 +751,7 @@ function exec(line) {
       } else {
         setSoundVol(lastSoundVol || 6); msg('SOUND ON, VOLUME ' + soundVol + ' (0-9).');
       }
+      saveVolumes();
       break;
     }
     case 'MUSIC': {
@@ -744,6 +766,7 @@ function exec(line) {
       } else {
         musicVol = lastMusicVol || 6; msg('MUSIC ON, VOLUME ' + musicVol + ' (0-9).');
       }
+      saveVolumes();
       break;
     }
     case 'HELP':
@@ -797,7 +820,7 @@ function move(d) {
 }
 // At FAINT_HP health or less you black out: the screen goes blank and you can't act
 // until resting brings you back above FAINT_HP. Monsters can still attack you while you're out.
-const FAINT_HP = 20;
+const FAINT_HP = 10;
 function checkFaint() {
   if (G.state !== 'play') return;
   if (!G.fainted && G.hp > 0 && G.hp <= FAINT_HP) {
@@ -811,7 +834,7 @@ function checkFaint() {
 function exert(now) {
   G.fatigue = Math.min(60, G.fatigue + 1);
   // Tuned so: 1-2 steps/s costs ~10 health per 20 steps; 3 steps/s would kill in ~25 steps,
-  // 4 steps/s in ~20, and ~8 steps/s in ~15 (you faint at 20 health before that happens).
+  // 4 steps/s in ~20, and ~8 steps/s in ~15 (you faint at 10 health before that happens).
   G.strain += 0.355 + 0.02 * G.fatigue + 0.125 * G.fatigue * G.fatigue;
   while (G.strain >= 1) { G.strain -= 1; G.hp -= 1; }
   if (G.hp <= 0) { die('YOUR HEART BURSTS FROM EXERTION.'); return; }
@@ -1065,7 +1088,7 @@ function monsterAttack(m) {
 // ---------- experience ----------
 // XP comes from kills and from picking up items. Rank rises with XP; higher rank means
 // harder strikes (bonus damage) and better evasion (chance to dodge a monster's blow).
-const XP_PER_KILL = { mould: 2, crawler: 4, toad: 6, hound: 10, wraith: 10, golem: 20, king: 45 };
+const XP_PER_KILL = { mould: 2, crawler: 4, skeleton: 6, hound: 10, wraith: 10, golem: 20, king: 45 };
 const XP_PER_ITEM = 3;
 function xpRank() { return Math.min(10, Math.floor(G.xp / 25)); }   // 0,25,50,... capped at 10
 function strikeBonus() { return xpRank(); }                        // extra damage per hit
@@ -1256,36 +1279,94 @@ const SHAPE = {
     P.push([[-0.2, 0.8], [-0.34, 0.72]], [[0.2, 0.8], [0.34, 0.72]]);
     return P;
   },
-  hound(t) {
-    const j = 0.03 * Math.sin(t / 150), P = [];
-    const legF = [[0.38, 0.56], [0.48, 0.28], [0.42, 0.1], [0.4, 0]];
-    const legB = [[0.6, 0.6], [0.72, 0.3], [0.68, 0.12], [0.66, 0.04]];
-    P.push(legB, mir(legB), legF, mir(legF));
-    P.push(ell(0, 0.62, 0.7, 0.3));
-    P.push([[-0.58, 0.84], [0.56, 0.86]]);
-    for (let i = -2; i <= 2; i++) P.push([[i * 0.18, 0.4], [i * 0.2, 0.84]]);
-    const head = [[-0.36, 1.25], [0.36, 1.25], [0.28, 0.86], [0, 0.7 + j], [-0.28, 0.86], [-0.36, 1.25]];
-    const ear = [[-0.32, 1.25], [-0.48, 1.5], [-0.14, 1.25]];
-    P.push(head, ear, mir(ear));
-    P.push([[-0.2, 0.86], [-0.28, 1.2]], [[0.2, 0.86], [0.28, 1.2]]);
-    P.push(ell(-0.16, 1.06, 0.06, 0.06, 8), ell(0.16, 1.06, 0.06, 0.06, 8));
-    P.push([[0, 1.0], [0, 0.74]], ell(0, 0.76, 0.03, 0.025, 6));
-    P.push([[-0.2, 0.86], [-0.14, 0.8], [-0.08, 0.86], [-0.02, 0.8], [0.04, 0.86], [0.1, 0.8], [0.16, 0.86], [0.2, 0.84]]);
+  hound(t) {                      // a skeletal hound facing you, crouched low with its jaw snapping
+    const jaw = 0.03 + 0.05 * Math.max(0, Math.sin(t / 260)), br = 0.015 * Math.sin(t / 300), P = [];
+    const bone = (pts, w) => { P.push(pts, pts.map(([x, y]) => [x + w, y])); for (let i = 1; i < pts.length - 1; i++) P.push(ell(pts[i][0] + w / 2, pts[i][1], 0.035, 0.032, 8)); };
+    const claws = (x, s) => { for (const d of [-0.07, 0, 0.07]) P.push([[x + d * s, 0.05], [x + d * 1.4 * s, 0]]); P.push(ell(x, 0.06, 0.09, 0.035, 10)); };
+    // hind legs, further back, mostly hidden behind the ribcage
+    for (const s of [-1, 1]) { P.push([[s * 0.26, 0.5], [s * 0.24, 0.1]], [[s * 0.29, 0.5], [s * 0.27, 0.1]]); P.push(ell(s * 0.255, 0.08, 0.06, 0.025, 8)); }
+    // ribcage seen end-on: hoops hanging from the spine, smaller as they go back
+    for (let i = 3; i >= 0; i--) { const k = 1 - i * 0.16; P.push(ell(0, 0.78 + i * 0.05 + br, 0.42 * k, 0.3 * k, 22, -Math.PI * 0.42, Math.PI * 1.42)); }
+    P.push([[0, 1.1 + br], [0, 0.48 + br]]);                                        // breastbone
+    // shoulder blades and front legs, splayed wide
+    for (const s of [-1, 1]) {
+      P.push([[s * 0.22, 1.08], [s * 0.5, 1.12], [s * 0.48, 0.86], [s * 0.36, 0.8], [s * 0.22, 1.08]]);
+      const l = [[s * 0.42, 0.86], [s * 0.54, 0.5], [s * 0.52, 0.06]];
+      bone(l, s * 0.045); claws(s * 0.545, s);
+    }
+    // lower jaw (behind the skull), dropping open
+    const jw = [[-0.24, 0.94], [-0.15, 0.6 - jaw], [0.15, 0.6 - jaw], [0.24, 0.94], [0.17, 0.92], [0.1, 0.67 - jaw], [-0.1, 0.67 - jaw], [-0.17, 0.92], [-0.24, 0.94]];
+    P.push(jw);
+    for (const s of [-1, 1]) P.push([[s * 0.11, 0.67 - jaw], [s * 0.1, 0.77 - jaw], [s * 0.085, 0.67 - jaw]]);
+    for (let i = -2; i <= 1; i++) { const x = i * 0.04 + 0.02; P.push([[x - 0.015, 0.67 - jaw], [x, 0.7 - jaw], [x + 0.015, 0.67 - jaw]]); }
+    // skull, face-on: domed crown, flaring cheekbones, muzzle narrowing toward you
+    const skull = [[-0.14, 1.32], [0.14, 1.32], [0.24, 1.24], [0.36, 1.06], [0.3, 0.98], [0.15, 0.94], [0.13, 0.76], [-0.13, 0.76], [-0.15, 0.94], [-0.3, 0.98], [-0.36, 1.06], [-0.24, 1.24], [-0.14, 1.32]];
+    P.push(skull);
+    P.push([[0, 1.32], [0, 1.2]]);                                                    // ridge on the crown
+    for (const s of [-1, 1]) {
+      P.push([[s * 0.2, 1.24], [s * 0.34, 1.46], [s * 0.3, 1.3], [s * 0.24, 1.22]]);   // swept horns
+      P.push([[s * 0.05, 1.1], [s * 0.21, 1.2], [s * 0.25, 1.07], [s * 0.12, 1.02], [s * 0.05, 1.1]]);   // slanted eye socket
+      P.push(ell(s * 0.155, 1.1, 0.02, 0.02, 6));                                     // ember
+      P.push([[s * 0.15, 0.94], [s * 0.3, 0.98]]);                                    // cheekbone
+      P.push([[s * 0.13, 0.77], [s * 0.115, 0.66], [s * 0.095, 0.77]]);               // upper fang
+    }
+    P.push([[0, 0.92], [-0.05, 0.84], [-0.02, 0.81], [0, 0.84], [0.02, 0.81], [0.05, 0.84], [0, 0.92]]);   // nose cavity
+    for (let i = -2; i <= 1; i++) { const x = i * 0.04 + 0.02; P.push([[x - 0.015, 0.77], [x, 0.73], [x + 0.015, 0.77]]); }
     return P;
   },
-  toad(t) {
-    const b = 0.03 * Math.sin(t / 300), P = [];
-    const leg = [[0.55, 0.32], [1.0, 0.46], [1.12, 0.02], [0.98, 0], [0.9, 0.12], [0.82, 0], [0.72, 0.09], [0.62, 0], [0.55, 0.1]];
-    P.push(leg, mir(leg));
-    P.push(ell(0, 0.5 + b, 0.95, 0.5 + b));
-    P.push(ell(0, 0.34, 0.6, 0.22, 16, 0.18, Math.PI - 0.18));
-    for (const [x, y] of [[-0.5, 0.6], [-0.2, 0.74], [0.3, 0.66], [0.55, 0.5], [-0.62, 0.4], [0.12, 0.52]]) P.push(ell(x, y, 0.05, 0.04, 6));
-    P.push(ell(-0.45, 0.98 + b, 0.18, 0.16, 12), ell(0.45, 0.98 + b, 0.18, 0.16, 12));
-    P.push(ell(-0.45, 0.98 + b, 0.1, 0.1, 8), ell(0.45, 0.98 + b, 0.1, 0.1, 8));
-    P.push(ell(-0.45, 1.0 + b, 0.045, 0.07, 6), ell(0.45, 1.0 + b, 0.045, 0.07, 6));
-    P.push(ell(0, 0.62, 0.6, 0.2, 16, 0.14, Math.PI - 0.14).map(([x, y]) => [x, 1.24 - y]));
-    P.push([[-0.1, 0.78], [-0.08, 0.73]], [[0.1, 0.78], [0.08, 0.73]]);
-    return P;
+  skeleton(t) {                   // a shambling skeleton raising a notched sword
+    const sw = 0.04 * Math.sin(t / 380), chat = 0.03 * Math.max(0, Math.sin(t / 110)), lift = 0.05 * Math.sin(t / 380), P = [];
+    // legs: twin bones (thigh and shin) with knobbed joints and splayed feet
+    const leg = [[0.12, 0.86], [0.2, 0.46], [0.18, 0.08]];
+    for (const l of [leg, mir(leg)]) {
+      P.push(l, l.map(([x, y]) => [x + Math.sign(x) * 0.03, y]).slice(1));
+      P.push(ell(l[1][0], l[1][1], 0.045, 0.04, 8));
+      const fx = l[2][0], s = Math.sign(fx);
+      P.push([[fx, 0.08], [fx + s * 0.04, 0.02], [fx + s * 0.18, 0.0], [fx + s * 0.2, 0.04], [fx, 0.08]]);
+    }
+    // pelvis
+    P.push([[-0.06, 0.98], [-0.22, 1.0], [-0.26, 0.88], [-0.12, 0.8], [0, 0.86], [0.12, 0.8], [0.26, 0.88], [0.22, 1.0], [0.06, 0.98], [-0.06, 0.98]]);
+    P.push(ell(-0.12, 0.89, 0.04, 0.035, 8), ell(0.12, 0.89, 0.04, 0.035, 8));
+    // spine with vertebrae
+    P.push([[0, 0.98], [0.01 + sw * 0.3, 1.56]]);
+    for (let i = 0; i < 5; i++) { const y = 1.0 + i * 0.06, x = sw * 0.3 * (y - 0.98) / 0.58; P.push([[x - 0.035, y], [x + 0.035, y]]); }
+    // ribs curving out from the spine and back toward the breastbone
+    for (let i = 0; i < 5; i++) {
+      const y = 1.5 - i * 0.075, w = 0.3 - i * 0.025, x0 = sw * 0.3 * (y - 0.98) / 0.58;
+      const rib = [[x0, y], [x0 + w * 0.55, y + 0.02], [x0 + w, y - 0.05], [x0 + w * 0.9, y - 0.12], [x0 + w * 0.45, y - 0.12]];
+      P.push(rib, rib.map(([x, yy]) => [2 * x0 - x, yy]));
+    }
+    P.push([[sw * 0.3, 1.52], [sw * 0.3, 1.2]]);                  // breastbone
+    // collarbones
+    const sh = 1.6;
+    P.push([[-0.38, sh - 0.02], [-0.1, sh + 0.02], [0.1, sh + 0.02], [0.38, sh - 0.02]]);
+    // left arm hangs loose, bony fingers dangling
+    const la = [[-0.38, sh - 0.02], [-0.46, 1.24], [-0.42, 0.92]];
+    P.push(la, la.map(([x, y]) => [x + 0.03, y]).slice(1), ell(-0.46, 1.24, 0.035, 0.035, 6));
+    for (const dx of [-0.04, -0.01, 0.02]) P.push([[-0.41, 0.92], [-0.42 + dx, 0.82], [-0.42 + dx * 1.3, 0.77]]);
+    // right arm raised, gripping a sword
+    const hx = 0.66, hy = 1.5 + lift;
+    const ra = [[0.38, sh - 0.02], [0.62, 1.3 + lift * 0.5], [hx, hy]];
+    P.push(ra, ra.map(([x, y]) => [x + 0.03, y - 0.02]).slice(1), ell(0.62, 1.3 + lift * 0.5, 0.035, 0.035, 6));
+    P.push([[hx - 0.02, hy - 0.04], [hx - 0.02, hy + 0.12]]);                                      // grip
+    P.push([[hx - 0.12, hy + 0.12], [hx + 0.08, hy + 0.12]]);                                      // crossguard
+    P.push([[hx - 0.06, hy + 0.12], [hx - 0.05, hy + 0.56], [hx - 0.02, hy + 0.66], [hx + 0.02, hy + 0.55],
+            [hx + 0.03, hy + 0.42], [hx, hy + 0.38], [hx + 0.02, hy + 0.3], [hx + 0.02, hy + 0.12], [hx - 0.06, hy + 0.12]]);   // notched blade
+    P.push(ell(hx - 0.02, hy, 0.04, 0.03, 8));                                                     // knuckles
+    // neck, then the jaw (chattering) and skull
+    const nx = sw * 0.3;
+    P.push([[nx, sh + 0.02], [nx, 1.7]]);
+    const jy = 1.71 - chat;
+    P.push([[nx - 0.11, 1.78], [nx - 0.1, jy], [nx + 0.1, jy], [nx + 0.11, 1.78]]);
+    for (let i = -2; i <= 2; i++) P.push([[nx + i * 0.035, jy], [nx + i * 0.035, jy + 0.035]]);
+    const cr = ell(nx, 1.92, 0.17, 0.17, 16, -0.6, Math.PI + 0.6);
+    P.push([...cr, [nx - 0.09, 1.76], [nx + 0.09, 1.76], cr[0]]);
+    for (let i = -2; i <= 2; i++) P.push([[nx + i * 0.035, 1.76], [nx + i * 0.035, 1.79]]);    // upper teeth
+    P.push(ell(nx - 0.065, 1.9, 0.05, 0.05, 10), ell(nx + 0.065, 1.9, 0.05, 0.05, 10));          // eye sockets
+    P.push(ell(nx - 0.065, 1.9, 0.015, 0.015, 6), ell(nx + 0.065, 1.9, 0.015, 0.015, 6));        // pinpoint glints
+    P.push([[nx, 1.85], [nx - 0.025, 1.8], [nx + 0.025, 1.8], [nx, 1.85]]);                    // nose hole
+    P.push([[nx + 0.05, 2.05], [nx + 0.09, 1.99], [nx + 0.06, 1.97]]);                         // a crack in the skull
+    return P.map(poly => poly.map(([x, y]) => [x * 0.75, y * 0.75]));   // scaled so the raised sword stays under the ceiling
   },
   wraith(t) {
     const f = 0.12 + 0.1 * Math.sin(t / 400), P = [], hem = [];
@@ -1506,7 +1587,7 @@ function renderView(now) {
 }
 // Overhead map colours
 const MAPCOL = { item: col(1, RGB.item), mon: col(1, RGB.mon), ladder: col(1, RGB.ladder) };
-const MAPCH = { mould: 'S', crawler: 'C', hound: 'H', toad: 'T', wraith: 'W', golem: 'G', king: 'K' };
+const MAPCH = { mould: 'S', crawler: 'C', hound: 'H', skeleton: 'B', wraith: 'W', golem: 'G', king: 'K' };
 // mode: 'explored' (cells you have seen, via the MAP item), 'full' (everything, SHIFT+F3 test view)
 function renderMap(mode, now) {
   const L = G.L, S = L.S, seen = L.seen;
@@ -1575,7 +1656,7 @@ function renderMap(mode, now) {
   ctx.fillText(mode === 'full' ? 'SHIFT+F3 OR ESC TO CLOSE' : 'LOOK OR ESC TO CLOSE', W - 14, 22);
   if (mode === 'full') {
     // colour-coded legend, laid out piece by piece and centred
-    const parts = [['S MOULD C CRAWLER T TOAD H HOUND W WRAITH G GOLEM K KING  ', MAPCOL.mon], ['◇ ITEM ▪ CARRIED  ', MAPCOL.item],
+    const parts = [['S MOULD C CRAWLER B SKELETON H HOUND W WRAITH G GOLEM K KING  ', MAPCOL.mon], ['◇ ITEM ▪ CARRIED  ', MAPCOL.item],
                    ['V DOWN ^ UP  ', MAPCOL.ladder], [L.mons.length + ' FOES ' + L.items.length + ' ITEMS', col(0.55)]];
     ctx.textAlign = 'left'; ctx.font = gameFont(12);
     let x = CX - parts.reduce((w, [t]) => w + ctx.measureText(t).width, 0) / 2;
