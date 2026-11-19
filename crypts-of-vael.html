@@ -93,21 +93,29 @@ function R(z) { const k = fz(z); return { l: CX - HW * k, r: CX + HW * k, t: CY 
 function col(a, c = FG) { return `rgba(${c[0]},${c[1]},${c[2]},${a})`; }
 
 // ---------- audio ----------
-let AC = null, soundOn = true;
+let AC = null;
+let soundVol = 6, lastSoundVol = 6;   // sound-effect volume 0 (off) .. 9 (loudest); 6 is the original loudness
 let musicVol = 7, lastMusicVol = 7;   // music volume 0 (off) .. 9 (loudest)
 const musicGainFor = v => Math.max(0, v) / 9 * 1.5;
+const sfxGainFor = v => Math.max(0, v) / 6;      // 6 = unchanged, 9 = 1.5x
+let sfxGain = null;
+function sfxBus(a) {
+  if (!sfxGain) { sfxGain = a.createGain(); sfxGain.gain.value = sfxGainFor(soundVol); sfxGain.connect(a.destination); }
+  return sfxGain;
+}
+function setSoundVol(v) { soundVol = v; if (AC && sfxGain) sfxGain.gain.setTargetAtTime(sfxGainFor(v), AC.currentTime, 0.05); }
 function ac() {
   if (!AC) { try { AC = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) { AC = null; } }
   if (AC && AC.state === 'suspended') AC.resume().catch(() => {});   // browsers pause audio until the player interacts
   return AC;
 }
 function tone(freq, dur, type = 'sine', vol = 0.2, slide = 0, delay = 0) {
-  if (!soundOn) return; const a = ac(); if (!a) return;
+  if (soundVol <= 0) return; const a = ac(); if (!a) return;
   const t0 = a.currentTime + delay, o = a.createOscillator(), g = a.createGain();
   o.type = type; o.frequency.setValueAtTime(freq, t0);
   if (slide) o.frequency.exponentialRampToValueAtTime(Math.max(20, freq * slide), t0 + dur);
   g.gain.setValueAtTime(vol, t0); g.gain.exponentialRampToValueAtTime(0.001, t0 + dur);
-  o.connect(g).connect(a.destination); o.start(t0); o.stop(t0 + dur + 0.02);
+  o.connect(g).connect(sfxBus(a)); o.start(t0); o.stop(t0 + dur + 0.02);
 }
 // ---------- music ----------
 // A note is [midi note number, beats]; 0 = rest. Each voice is a list of notes played back to back.
@@ -116,7 +124,7 @@ let musicNodes = [];
 function stopMusic() { for (const o of musicNodes) { try { o.stop(); } catch (e) { /* already stopped */ } } musicNodes = []; }
 function playTune(voices, bpm) {
   stopMusic();
-  if (!soundOn) return;
+  if (soundVol <= 0) return;
   const a = ac(); if (!a) return;
   const beat = 60 / bpm, start = a.currentTime + 0.4;
   for (const { notes, wave, vol } of voices) {
@@ -130,7 +138,7 @@ function playTune(voices, bpm) {
         g.gain.linearRampToValueAtTime(vol, t + 0.03);
         g.gain.setValueAtTime(vol, t + len * 0.75);
         g.gain.exponentialRampToValueAtTime(0.0001, t + len * 0.98);
-        o.connect(g).connect(a.destination); o.start(t); o.stop(t + len);
+        o.connect(g).connect(sfxBus(a)); o.start(t); o.stop(t + len);
         musicNodes.push(o);
       }
       t += len;
@@ -292,11 +300,11 @@ function cryPan(m) {
   return Math.max(-1, Math.min(1, right / (Math.abs(right) + Math.abs(fwd) + 0.5)));
 }
 function monsterCry(m, level) {
-  if (!soundOn || level <= 0) return;
+  if (soundVol <= 0 || level <= 0) return;
   const a = ac(); if (!a) return;
   const out = a.createGain(); out.gain.value = 0.5 * level * CRY_GAIN[m.k];
-  if (a.createStereoPanner) { const p = a.createStereoPanner(); p.pan.value = cryPan(m); out.connect(p).connect(a.destination); }
-  else out.connect(a.destination);
+  if (a.createStereoPanner) { const p = a.createStereoPanner(); p.pan.value = cryPan(m); out.connect(p).connect(sfxBus(a)); }
+  else out.connect(sfxBus(a));
   CRIES[m.k](a, out, a.currentTime + 0.02);
 }
 const SFX = {
@@ -674,7 +682,19 @@ function exec(line) {
       try { localStorage.setItem('vael-animate', animOn ? 'on' : 'off'); } catch (e) { /* ignore */ }
       msg('MOVEMENT ANIMATION ' + (animOn ? 'ON' : 'OFF') + '.'); break;
     case 'SEED': msg('MAZE SEED: ' + G.seed + '   (TYPE SEED <NUMBER> TO START A NEW MAZE)'); break;
-    case 'SOUND': soundOn = !soundOn; msg('SOUND ' + (soundOn ? 'ON' : 'OFF') + '.'); break;
+    case 'SOUND': {
+      const arg = t[1];
+      if (arg !== undefined && /^[0-9]$/.test(arg)) {
+        setSoundVol(+arg);
+        if (soundVol > 0) lastSoundVol = soundVol;
+        msg(soundVol === 0 ? 'SOUND OFF.' : 'SOUND VOLUME ' + soundVol + ' (0-9).');
+      } else if (soundVol > 0) {
+        lastSoundVol = soundVol; setSoundVol(0); msg('SOUND OFF.');
+      } else {
+        setSoundVol(lastSoundVol || 6); msg('SOUND ON, VOLUME ' + soundVol + ' (0-9).');
+      }
+      break;
+    }
     case 'MUSIC': {
       const arg = t[1];
       if (arg !== undefined && /^[0-9]$/.test(arg)) {
@@ -693,7 +713,7 @@ function exec(line) {
       msg('MOVE [BACK|LEFT|RIGHT]   TURN LEFT|RIGHT|AROUND   ATTACK L|R   DESCEND  ASCEND');
       msg('GET L|R [ITEM]  DROP L|R  STOW L|R  PULL L|R ITEM  USE L|R|ITEM');
       msg('USE MAP SHOWS WHERE YOU HAVE BEEN (YOU START WITH A MAP IN YOUR PACK).');
-      msg('SAVE  LOAD  PAUSE  EXAMINE (PACK)  LOOK  SEED  SOUND  MUSIC [0-9]  ANIMATE.  WORDS MAY BE ABBREVIATED.');
+      msg('SAVE  LOAD  PAUSE  EXAMINE (PACK)  LOOK  SEED  SOUND [0-9]  MUSIC [0-9]  ANIMATE.  WORDS MAY BE ABBREVIATED.');
       msg('EVERY STEP TIRES YOU; HURRYING TIRES YOU MORE. STAND STILL TO RECOVER.');
       break;
   }
