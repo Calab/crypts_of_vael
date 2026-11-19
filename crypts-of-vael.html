@@ -1,0 +1,1572 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Crypts of Vael</title>
+<style>
+  :root { --fg:#7dff9a; --dim:#2f7a45; --bg:#000; }
+  html,body { background:var(--bg); color:var(--fg); margin:0; }
+  :root { --fs:15px; }
+  html,body { min-height:100%; }   /* below the minimum size the page scrolls instead of shrinking */
+  body { font-family:"Courier New",Courier,monospace; padding:0 16px; }
+  #wrap { padding:12px 0; box-sizing:border-box; margin:0 auto; }
+  canvas { display:block; background:#000; border:1px solid #1d4a28; box-sizing:border-box; }
+  #log { height:8.2em; overflow:hidden; white-space:pre-wrap; font-size:var(--fs); line-height:1.36em;
+         margin-top:8px; display:flex; flex-direction:column; justify-content:flex-end; }
+  #log div.old { color:var(--dim); }
+  #row { display:flex; align-items:center; gap:6px; border-top:1px solid #1d4a28; padding-top:6px; }
+  #row span { font-size:calc(var(--fs) + 1px); }
+  #cmd { flex:1; background:#000; color:var(--fg); border:none; outline:none;
+         font:calc(var(--fs) + 1px) "Courier New",monospace; text-transform:uppercase; caret-color:var(--fg); }
+  #cmd::placeholder { color:var(--dim); }
+  #hint { color:var(--dim); font-size:calc(var(--fs) * 0.8); margin-top:6px; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="cv"></canvas>
+  <div id="below">
+  <div id="log"></div>
+  <div id="row"><span>&gt;</span><input id="cmd" autocomplete="off" spellcheck="false" autofocus></div>
+  <div id="hint">Type commands (HELP for list). Enter on an empty prompt repeats the last command.</div>
+  </div>
+</div>
+<script>
+"use strict";
+// ---------- setup ----------
+const cv = document.getElementById('cv'), ctx = cv.getContext('2d');
+const W = 800, H = 500, VH = 440;   // logical drawing size; the canvas is scaled to fit the window
+let SCALE = 1;
+const MIN_W = 640;                    // smallest game width (640x400 drawing area + text = about 640x480)
+function resize() {
+  const wrap = document.getElementById('wrap'), below = document.getElementById('below');
+  const setFont = w => document.documentElement.style.setProperty('--fs', Math.max(12, Math.min(22, w / 52)) + 'px');
+  const availW = Math.max(MIN_W, window.innerWidth - 32);
+  // Text size follows the game width, and the text can wrap differently once the width changes,
+  // so settle the layout in a few passes.
+  let w = availW;
+  for (let i = 0; i < 3; i++) {
+    setFont(w);
+    wrap.style.width = w + 'px';
+    const availH = window.innerHeight - below.offsetHeight - 30;
+    w = Math.max(MIN_W, Math.floor(Math.min(availW, availH * W / H)));
+  }
+  setFont(w);
+  wrap.style.width = w + 'px';
+  const h = Math.round(w * H / W);
+  cv.style.width = w + 'px'; cv.style.height = h + 'px';
+  const dpr = window.devicePixelRatio || 1;         // full-resolution backing store keeps lines crisp
+  cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr);
+  SCALE = cv.width / W;
+}
+window.addEventListener('resize', resize);
+const CX = W / 2, CY = VH / 2, HW = W / 2, HH = VH / 2;
+const DX = [0, 1, 0, -1], DY = [-1, 0, 1, 0];
+const DIRN = ['NORTH', 'EAST', 'SOUTH', 'WEST'];
+const FG = [125, 255, 154];
+// Highlight colours shared by the 3D view and the overhead maps
+const RGB = { item: [255, 227, 77], mon: [255, 77, 77], ladder: [77, 232, 255], wall: [255, 255, 255] };
+// RNG is swapped for a seeded generator while a level is being built, so a seed always gives the same mazes.
+let RNG = Math.random;
+const rnd = (a, b) => a + Math.floor(RNG() * (b - a + 1));
+const pick = a => a[Math.floor(RNG() * a.length)];
+function mulberry32(a) {
+  return function () {
+    a |= 0; a = a + 0x6D2B79F5 | 0;
+    let t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+function parseSeed(str) {
+  str = (str || '').trim();
+  if (!str) return 100000 + Math.floor(Math.random() * 900000);
+  if (/^\d+$/.test(str)) return Number(str) % 4294967296;
+  let h = 2166136261;                       // FNV-1a hash for text seeds
+  for (const ch of str.toUpperCase()) { h ^= ch.charCodeAt(0); h = Math.imul(h, 16777619); }
+  return h >>> 0;
+}
+const fz = z => 1 / (1 + 0.85 * z);
+function R(z) { const k = fz(z); return { l: CX - HW * k, r: CX + HW * k, t: CY - HH * k, b: CY + HH * k, k }; }
+function col(a, c = FG) { return `rgba(${c[0]},${c[1]},${c[2]},${a})`; }
+
+// ---------- audio ----------
+let AC = null, soundOn = true;
+let musicVol = 7, lastMusicVol = 7;   // music volume 0 (off) .. 9 (loudest)
+const musicGainFor = v => Math.max(0, v) / 9 * 1.5;
+function ac() {
+  if (!AC) { try { AC = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) { AC = null; } }
+  if (AC && AC.state === 'suspended') AC.resume().catch(() => {});   // browsers pause audio until the player interacts
+  return AC;
+}
+function tone(freq, dur, type = 'sine', vol = 0.2, slide = 0, delay = 0) {
+  if (!soundOn) return; const a = ac(); if (!a) return;
+  const t0 = a.currentTime + delay, o = a.createOscillator(), g = a.createGain();
+  o.type = type; o.frequency.setValueAtTime(freq, t0);
+  if (slide) o.frequency.exponentialRampToValueAtTime(Math.max(20, freq * slide), t0 + dur);
+  g.gain.setValueAtTime(vol, t0); g.gain.exponentialRampToValueAtTime(0.001, t0 + dur);
+  o.connect(g).connect(a.destination); o.start(t0); o.stop(t0 + dur + 0.02);
+}
+// ---------- music ----------
+// A note is [midi note number, beats]; 0 = rest. Each voice is a list of notes played back to back.
+const midiHz = m => 440 * Math.pow(2, (m - 69) / 12);
+let musicNodes = [];
+function stopMusic() { for (const o of musicNodes) { try { o.stop(); } catch (e) { /* already stopped */ } } musicNodes = []; }
+function playTune(voices, bpm) {
+  stopMusic();
+  if (!soundOn) return;
+  const a = ac(); if (!a) return;
+  const beat = 60 / bpm, start = a.currentTime + 0.4;
+  for (const { notes, wave, vol } of voices) {
+    let t = start;
+    for (const [m, beats] of notes) {
+      const len = beats * beat;
+      if (m) {
+        const o = a.createOscillator(), g = a.createGain();
+        o.type = wave; o.frequency.value = midiHz(m);
+        g.gain.setValueAtTime(0.0001, t);
+        g.gain.linearRampToValueAtTime(vol, t + 0.03);
+        g.gain.setValueAtTime(vol, t + len * 0.75);
+        g.gain.exponentialRampToValueAtTime(0.0001, t + len * 0.98);
+        o.connect(g).connect(a.destination); o.start(t); o.stop(t + len);
+        musicNodes.push(o);
+      }
+      t += len;
+    }
+  }
+}
+const TUNES = {
+  // slow lament in D minor
+  death: () => playTune([
+    { wave: 'triangle', vol: 0.22, notes: [[62, 1], [65, 1], [69, 1.5], [67, 0.5], [65, 1], [64, 1], [62, 2], [57, 1], [61, 1], [62, 3]] },
+    { wave: 'sine', vol: 0.18, notes: [[50, 4], [46, 3], [45, 3], [38, 3]] },
+  ], 66),
+  // bright fanfare in C major
+  victory: () => playTune([
+    { wave: 'square', vol: 0.07, notes: [[67, 0.5], [72, 0.5], [76, 0.5], [79, 1], [76, 0.5], [79, 0.5], [81, 0.5], [79, 0.5], [76, 0.5], [72, 0.5], [74, 0.5], [76, 0.5], [72, 1.5],
+                                          [0, 0.5], [72, 0.5], [76, 0.5], [79, 0.5], [84, 2]] },
+    { wave: 'triangle', vol: 0.2, notes: [[48, 2], [53, 2], [55, 2], [48, 2], [0, 0.5], [48, 0.5], [52, 0.5], [55, 0.5], [60, 2]] },
+  ], 150),
+};
+// ---------- background music ----------
+// A small step-sequencer loops two moods: a mellow theme while exploring and a driving one in combat.
+// Notes are scheduled a little ahead of the audio clock from the game loop. Toggled by the MUSIC command.
+// Each pattern: stepDur seconds per step; bass/lead are per-step MIDI notes (0 = rest), held for *Len steps.
+const MUSIC = {
+  explore: {   // ~11s mellow loop: Am - F - C - G, each held 8 steps, with a soft sparse arpeggio
+    stepDur: 0.34, len: 32, bassWave: 'sine', bassVol: 0.12, bassLen: 8, wave: 'triangle', leadVol: 0.045, leadLen: 3,
+    bass: [45, 0, 0, 0, 0, 0, 0, 0, 41, 0, 0, 0, 0, 0, 0, 0, 48, 0, 0, 0, 0, 0, 0, 0, 43, 0, 0, 0, 0, 0, 0, 0],
+    lead: [69, 0, 0, 76, 0, 0, 72, 0, 69, 0, 0, 77, 0, 0, 72, 0, 72, 0, 0, 79, 0, 0, 76, 0, 74, 0, 0, 79, 0, 0, 71, 0],
+  },
+  combat: {
+    stepDur: 0.135, len: 16, bassWave: 'sawtooth', bassVol: 0.11, bassLen: 1, wave: 'square', leadVol: 0.05, leadLen: 1,
+    bass: [45, 45, 57, 45, 45, 45, 57, 45, 43, 43, 55, 43, 48, 48, 47, 46],
+    lead: [69, 0, 72, 0, 69, 0, 70, 0, 69, 0, 68, 0, 69, 72, 76, 74],
+  },
+};
+let musicGain = null, musicState = null;
+function musicBus(a) {
+  if (!musicGain) { musicGain = a.createGain(); musicGain.gain.value = 1; musicGain.connect(a.destination); }
+  return musicGain;
+}
+function musicNote(a, midi, dur, type, vol, t) {
+  const o = a.createOscillator(), g = a.createGain();
+  o.type = type; o.frequency.value = midiHz(midi);
+  g.gain.setValueAtTime(0.0001, t);
+  g.gain.linearRampToValueAtTime(vol, t + 0.02);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + Math.max(0.05, dur));
+  o.connect(g).connect(musicBus(a)); o.start(t); o.stop(t + dur + 0.05);
+}
+function inCombat() {
+  if (!G || G.state !== 'play') return false;
+  if (performance.now() - G.lastHurt < 4000) return true;
+  const S = G.L.S, pd = G.pdist;
+  return G.L.mons.some(m => !m.dormant && pd[m.y * S + m.x] <= 2);
+}
+function musicTick() {
+  if (musicVol <= 0 || !G || G.state !== 'play' || G.pending) { musicState = null; return; }
+  const a = ac(); if (!a || a.state !== 'running') return;
+  if (!musicState) musicState = { nextTime: a.currentTime + 0.08, step: 0, mode: 'explore' };
+  musicBus(a).gain.setTargetAtTime(musicGainFor(musicVol), a.currentTime, 0.1);
+  while (musicState.nextTime < a.currentTime + 0.25) {
+    const want = inCombat() ? 'combat' : 'explore';   // combat cuts in at once; the mellow loop resumes at its boundary
+    if (want !== musicState.mode) {
+      if (want === 'combat') { musicState.mode = 'combat'; musicState.step = 0; }
+      else if (musicState.step === 0) musicState.mode = 'explore';
+    }
+    const pat = MUSIC[musicState.mode], t = musicState.nextTime, st = musicState.step;
+    const b = pat.bass[st], l = pat.lead[st];
+    if (b) musicNote(a, b, pat.stepDur * pat.bassLen * 0.95, pat.bassWave, pat.bassVol, t);
+    if (l) musicNote(a, l, pat.stepDur * pat.leadLen * 0.9, pat.wave, pat.leadVol, t);
+    musicState.nextTime += pat.stepDur;
+    musicState.step = (st + 1) % pat.len;
+  }
+}
+function fadeMusicOut() { if (AC && musicGain) musicGain.gain.setTargetAtTime(0.0001, AC.currentTime, 0.15); musicState = null; }
+// ---------- monster voices ----------
+// Every monster type has its own synthesised cry. Volume falls off with path distance through the maze,
+// and the sound is panned left/right according to where the monster is relative to the way you face.
+const HEAR_RANGE = 22;
+const CRY_GAIN = { mould: 1.5, crawler: 2, hound: 2.1, toad: 2, wraith: 1, golem: 0.75, king: 2.3 };   // evens out loudness
+let NOISE = null;
+function noiseBuf(a) {
+  if (!NOISE) {
+    NOISE = a.createBuffer(1, a.sampleRate, a.sampleRate);
+    const d = NOISE.getChannelData(0);
+    for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+  }
+  return NOISE;
+}
+function env(g, t, peak, att, dur) {
+  g.gain.setValueAtTime(0.0001, t);
+  g.gain.linearRampToValueAtTime(peak, t + att);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+}
+function vOsc(a, out, type, f, t, dur, peak, att = 0.01) {
+  const o = a.createOscillator(), g = a.createGain();
+  o.type = type; o.frequency.setValueAtTime(f, t); env(g, t, peak, att, dur);
+  o.connect(g).connect(out); o.start(t); o.stop(t + dur + 0.05);
+  return o;
+}
+function vNoise(a, out, t, dur, peak, freq, q = 1, att = 0.005) {
+  const src = a.createBufferSource(), f = a.createBiquadFilter(), g = a.createGain();
+  src.buffer = noiseBuf(a); f.type = 'bandpass'; f.frequency.value = freq; f.Q.value = q;
+  env(g, t, peak, att, dur);
+  src.connect(f).connect(g).connect(out); src.start(t, Math.random() * 0.5); src.stop(t + dur + 0.05);
+}
+const CRIES = {
+  mould(a, out, t) {              // bubbling, wet squelch
+    for (let i = 0; i < 3; i++) {
+      const st = t + i * 0.13 + Math.random() * 0.05, o = vOsc(a, out, 'sine', 140 + Math.random() * 60, st, 0.1, 0.5, 0.005);
+      o.frequency.exponentialRampToValueAtTime(420, st + 0.09);
+    }
+    vNoise(a, out, t, 0.45, 0.35, 300, 1.2, 0.05);
+  },
+  crawler(a, out, t) {            // dry skittering clicks
+    for (let i = 0; i < 7; i++) vNoise(a, out, t + i * 0.045 + Math.random() * 0.015, 0.025, 0.9, 3500 + Math.random() * 1500, 4, 0.002);
+  },
+  hound(a, out, t) {              // three panting breaths, then a snarl
+    for (let i = 0; i < 3; i++) vNoise(a, out, t + i * 0.28, 0.18, 0.7, 900, 1.5, 0.03);
+    const o = vOsc(a, out, 'sawtooth', 95, t + 0.85, 0.45, 0.3, 0.05);
+    o.frequency.linearRampToValueAtTime(125, t + 1.0); o.frequency.linearRampToValueAtTime(85, t + 1.3);
+  },
+  toad(a, out, t) {               // two wobbling croaks
+    for (let i = 0; i < 2; i++) {
+      const st = t + i * 0.42, o = vOsc(a, out, 'square', 80, st, 0.3, 0.3, 0.02);
+      o.frequency.exponentialRampToValueAtTime(55, st + 0.3);
+      const lfo = a.createOscillator(), lg = a.createGain();
+      lfo.frequency.value = 28; lg.gain.value = 25; lfo.connect(lg).connect(o.frequency); lfo.start(st); lfo.stop(st + 0.35);
+    }
+  },
+  wraith(a, out, t) {             // rising then falling moan with breathy air
+    for (const [type, f, pk] of [['sine', 260, 0.45], ['triangle', 263, 0.22]]) {
+      const o = vOsc(a, out, type, f, t, 1.6, pk, 0.4);
+      o.frequency.linearRampToValueAtTime(f * 1.27, t + 0.6); o.frequency.exponentialRampToValueAtTime(f * 0.65, t + 1.6);
+    }
+    vNoise(a, out, t, 1.4, 0.15, 600, 0.7, 0.5);
+  },
+  golem(a, out, t) {              // two heavy clanking footfalls
+    for (let i = 0; i < 2; i++) {
+      const st = t + i * 0.5;
+      vOsc(a, out, 'sine', 55, st, 0.3, 0.8, 0.005);
+      vNoise(a, out, st, 0.25, 0.5, 250, 1, 0.005);
+      vOsc(a, out, 'square', 310, st + 0.02, 0.12, 0.1, 0.002);
+      vOsc(a, out, 'square', 437, st + 0.02, 0.1, 0.07, 0.002);
+    }
+  },
+  king(a, out, t) {               // a cold, descending laugh
+    [330, 294, 262, 233].forEach((f, i) => {
+      const st = t + i * 0.22, o = vOsc(a, out, 'sawtooth', f, st, 0.17, 0.25, 0.02);
+      o.frequency.exponentialRampToValueAtTime(f * 0.85, st + 0.17);
+      vNoise(a, out, st, 0.12, 0.15, f * 3, 3, 0.01);
+    });
+  },
+};
+// Loudness 0..1 from path distance (1 = adjacent), and stereo pan -1..1 from the monster's position.
+function cryLevel(dist) { return dist < 0 || dist > HEAR_RANGE ? 0 : Math.pow(1 - Math.max(0, dist - 1) / HEAR_RANGE, 1.3); }
+function cryPan(m) {
+  const d = G.p.dir, dx = m.x - G.p.x, dy = m.y - G.p.y;
+  const right = dx * DX[(d + 1) % 4] + dy * DY[(d + 1) % 4], fwd = dx * DX[d] + dy * DY[d];
+  return Math.max(-1, Math.min(1, right / (Math.abs(right) + Math.abs(fwd) + 0.5)));
+}
+function monsterCry(m, level) {
+  if (!soundOn || level <= 0) return;
+  const a = ac(); if (!a) return;
+  const out = a.createGain(); out.gain.value = 0.5 * level * CRY_GAIN[m.k];
+  if (a.createStereoPanner) { const p = a.createStereoPanner(); p.pan.value = cryPan(m); out.connect(p).connect(a.destination); }
+  else out.connect(a.destination);
+  CRIES[m.k](a, out, a.currentTime + 0.02);
+}
+const SFX = {
+  beat(gap = 0.14) { tone(70, 0.11, 'sine', 0.45, 0.6); tone(55, 0.11, 'sine', 0.35, 0.6, gap); },
+  swing() { tone(900, 0.09, 'triangle', 0.08, 0.3); },
+  hit() { tone(180, 0.12, 'square', 0.12, 0.4); },
+  hurt() { tone(120, 0.25, 'sawtooth', 0.2, 0.5); },
+  kill() { tone(300, 0.4, 'sawtooth', 0.15, 0.2); },
+  get() { tone(660, 0.07, 'square', 0.06); tone(880, 0.07, 'square', 0.06, 0, 0.07); },
+  thud() { tone(85, 0.22, 'sine', 0.6, 0.45); tone(160, 0.06, 'square', 0.08, 0.3); },
+  step() { tone(90, 0.04, 'triangle', 0.05); },
+  descend() { tone(400, 1.2, 'sine', 0.15, 0.25); },
+};
+
+// ---------- data ----------
+const ITEMS = {
+  dagger:   { name: 'DAGGER', type: 'weapon', dmg: [3, 7], hit: 0.92, cd: 600 },
+  axe:      { name: 'HAND AXE', type: 'weapon', dmg: [5, 10], hit: 0.86, cd: 700 },
+  sword:    { name: 'SHORT SWORD', type: 'weapon', dmg: [6, 12], hit: 0.88, cd: 750 },
+  hammer:   { name: 'WAR HAMMER', type: 'weapon', dmg: [9, 18], hit: 0.78, cd: 1000 },
+  rune:     { name: 'RUNE BLADE', type: 'weapon', dmg: [14, 24], hit: 0.9, cd: 750 },
+  buckler:  { name: 'BUCKLER', type: 'shield', block: 0.3 },
+  tower:    { name: 'TOWER SHIELD', type: 'shield', block: 0.5 },
+  torch:    { name: 'PITCH TORCH', type: 'light', range: 4, dur: 200 },
+  lantern:  { name: 'OIL LANTERN', type: 'light', range: 7, dur: 420 },
+  mending:  { name: 'MENDING DRAUGHT', type: 'potion', heal: 50 },
+  herb:     { name: 'HEALING HERB', type: 'potion', heal: 20 },
+  vigor:    { name: 'VIGOR TONIC', type: 'potion', max: 20 },
+  map:      { name: 'DUNGEON MAP', type: 'map' },
+  relic:    { name: 'GOLDEN RELIC', type: 'treasure', xp: 15 },
+  crown:    { name: 'EMBER CROWN', type: 'goal' },
+};
+const MON = {   // listed weakest to strongest (seed 0 shows them in this order)
+  mould:   { name: 'SLIME MOULD', hp: 8, dmg: [1, 3], atk: 2200, move: 1900, hit: 0.6, cry: 1600, sound: 'A WET SQUELCH' },
+  crawler: { name: 'GLOOMCRAWLER', hp: 16, dmg: [2, 5], atk: 1700, move: 950, hit: 0.7, cry: 1300, sound: 'SKITTERING' },
+  toad:    { name: 'MIRE TOAD', hp: 24, dmg: [3, 7], atk: 1300, move: 1450, hit: 0.72, cry: 1700, sound: 'A WET CROAK' },
+  hound:   { name: 'BONE HOUND', hp: 42, dmg: [4, 9], atk: 2000, move: 600, hit: 0.75, cry: 1100, sound: 'RASPING BREATH' },
+  wraith:  { name: 'ASH WRAITH', hp: 38, dmg: [6, 11], atk: 1500, move: 800, hit: 0.8, cry: 2000, sound: 'A HOLLOW MOAN' },
+  golem:   { name: 'IRON GOLEM', hp: 80, dmg: [8, 15], atk: 2200, move: 1600, hit: 0.75, cry: 1500, sound: 'GRINDING IRON' },
+  king:    { name: 'HOLLOW KING', hp: 210, dmg: [10, 18], atk: 1600, move: 1000, hit: 0.8, cry: 2400, sound: 'A COLD LAUGH' },
+};
+const LEVELS = [
+  { mons: { mould: 4, crawler: 4, toad: 2 }, items: ['axe', 'buckler', 'torch', 'torch', 'mending', 'relic'] },
+  { mons: { mould: 2, crawler: 3, toad: 3, hound: 2 }, items: ['sword', 'torch', 'lantern', 'mending', 'vigor', 'relic'] },
+  { mons: { toad: 3, hound: 3, wraith: 2 }, items: ['hammer', 'tower', 'lantern', 'mending', 'mending', 'relic'] },
+  { mons: { hound: 2, wraith: 3, golem: 2 }, items: ['rune', 'lantern', 'mending', 'vigor', 'relic'] },
+  { mons: { wraith: 2, golem: 3 }, items: ['lantern', 'mending', 'mending', 'relic'], boss: 'king' },
+];
+// Extra random items scattered on every level (count = 4 + level number).
+const FILLER = ['herb', 'herb', 'herb', 'torch', 'torch', 'mending', 'lantern', 'buckler', 'axe', 'dagger'];
+// Things a monster may be carrying (about 1 in 3 monsters carries one; dropped when it dies).
+const LOOT = ['herb', 'herb', 'mending', 'mending', 'torch', 'lantern', 'vigor', 'dagger', 'axe', 'sword', 'buckler'];
+const LOOT_CHANCE = 0.35;
+const PACK_MAX = 8;
+// Monsters on deeper levels have more health (about +28% per level, so level 5 is roughly double level 1).
+const hpScale = n => 1 + (n - 1) * 0.28;
+const aName = it => (/^[AEIOU]/.test(it.name) ? 'AN ' : 'A ') + it.name;   // "AN OIL LANTERN"
+function makeItem(kind, extra) { return Object.assign({ kind }, ITEMS[kind], extra || {}); }
+
+// ---------- maze ----------
+function carve(S) {
+  const g = new Uint8Array(S * S).fill(1);
+  const st = [[1, 1]]; g[S + 1] = 0;
+  while (st.length) {
+    const [x, y] = st[st.length - 1], opts = [];
+    for (let d = 0; d < 4; d++) {
+      const nx = x + DX[d] * 2, ny = y + DY[d] * 2;
+      if (nx > 0 && ny > 0 && nx < S - 1 && ny < S - 1 && g[ny * S + nx]) opts.push(d);
+    }
+    if (!opts.length) { st.pop(); continue; }
+    const d = pick(opts);
+    g[(y + DY[d]) * S + x + DX[d]] = 0; g[(y + DY[d] * 2) * S + x + DX[d] * 2] = 0;
+    st.push([x + DX[d] * 2, y + DY[d] * 2]);
+  }
+  let n = Math.floor(S * S * 0.06);
+  while (n-- > 0) {
+    const x = rnd(1, S - 2), y = rnd(1, S - 2), i = y * S + x;
+    if (!g[i]) continue;
+    const h = !g[i - 1] && !g[i + 1] && g[i - S] && g[i + S];
+    const v = !g[i - S] && !g[i + S] && g[i - 1] && g[i + 1];
+    if (h || v) g[i] = 0;
+  }
+  return g;
+}
+function bfs(L, sx, sy) {
+  const S = L.S, dist = new Int16Array(S * S).fill(-1), q = [sx + sy * S];
+  dist[q[0]] = 0;
+  for (let h = 0; h < q.length; h++) {
+    const i = q[h], x = i % S, y = (i / S) | 0;
+    for (let d = 0; d < 4; d++) {
+      const j = (y + DY[d]) * S + x + DX[d];
+      if (!L.g[j] && dist[j] < 0) { dist[j] = dist[i] + 1; q.push(j); }
+    }
+  }
+  return dist;
+}
+function makeLevel(n) {
+  const prev = RNG;
+  RNG = mulberry32((G.seed ^ Math.imul(n, 0x9E3779B1)) >>> 0);
+  try { return buildLevel(n); } finally { RNG = prev; }
+}
+function buildLevel(n) {
+  const S = 21 + n * 2, L = { n, S, g: carve(S), items: [], mons: [], stairs: null, up: n > 1 ? { x: 1, y: 1 } : null, seen: new Uint8Array(S * S) };
+  const dist = bfs(L, 1, 1);
+  let far = 0;
+  for (let i = 0; i < S * S; i++) if (dist[i] > dist[far]) far = i;
+  const fx = far % S, fy = (far / S) | 0;
+  const def = LEVELS[n - 1];
+  if (n < LEVELS.length) L.stairs = { x: fx, y: fy };
+  const used = new Set([S + 1, far]);
+  // Seed 0 is a test maze: one sleeping monster of every type is lined up along the route to the ladder.
+  const showcase = [];
+  if (G.seed === 0 && n === 1) {
+    const toFar = bfs(L, fx, fy), path = [];
+    let x = 1, y = 1;
+    while (toFar[y * S + x] > 0) {
+      path.push([x, y]);
+      const d = [0, 1, 2, 3].find(d => toFar[(y + DY[d]) * S + x + DX[d]] === toFar[y * S + x] - 1);
+      x += DX[d]; y += DY[d];
+    }
+    Object.keys(MON).forEach((k, i) => {
+      const c = path[3 + i * 2]; if (!c) return;
+      used.add(c[1] * S + c[0]); showcase.push([k, { x: c[0], y: c[1] }]);
+    });
+  }
+  const free = minD => {
+    for (let t = 0; t < 5000; t++) {
+      const i = rnd(0, S * S - 1);
+      if (dist[i] >= minD && !used.has(i)) { used.add(i); return { x: i % S, y: (i / S) | 0 }; }
+    }
+    return null;
+  };
+  for (const k of def.items) {
+    const c = free(3); if (!c) continue;
+    L.items.push({ x: c.x, y: c.y, it: makeItem(k) });
+  }
+  for (let i = 0; i < 4 + n; i++) {
+    const c = free(2); if (!c) continue;
+    L.items.push({ x: c.x, y: c.y, it: makeItem(pick(FILLER)) });
+  }
+  const addMon = (k, c) => { const hp = Math.round(MON[k].hp * hpScale(n)); L.mons.push({ k, ...MON[k], hp, maxHp: hp, x: c.x, y: c.y, nextMove: 0, nextAtk: 0, hurt: 0, ph: Math.random() * 6 }); };
+  for (const k in def.mons) for (let i = 0; i < def.mons[k]; i++) { const c = free(8); if (c) addMon(k, c); }
+  if (def.boss) addMon(def.boss, { x: fx, y: fy });
+  for (const [k, c] of showcase) { addMon(k, c); L.mons[L.mons.length - 1].dormant = true; }
+  for (const m of L.mons) if (m.k !== 'king' && RNG() < LOOT_CHANCE) m.carry = makeItem(pick(LOOT));
+  return L;
+}
+const isWall = (x, y) => x < 0 || y < 0 || x >= G.L.S || y >= G.L.S || G.L.g[y * G.L.S + x] === 1;
+const monAt = (x, y) => G.L.mons.find(m => m.x === x && m.y === y);
+const itemsAt = (x, y) => G.L.items.filter(o => o.x === x && o.y === y);
+
+// ---------- state ----------
+let G;
+let lastSeed = null;
+function newGame(seed) {
+  stopMusic(); musicState = null;
+  lastSeed = seed;
+  G = { seed, fatigue: 0, strain: 0, lastMove: 0, nextWarn: 0, state: 'play', lvl: 1, hp: 100, maxhp: 100, hands: [null, null], pack: [makeItem('torch'), makeItem('map')],
+        light: null, view: 'main', lastHurt: 0, atkReady: [0, 0], flash: 0, swing: null,
+        nextBeat: 0, beatT: 0, nextSound: 0, last: '', kills: 0, xp: 0, lastRank: 0, levels: {} };
+  enterLevel(1);
+  G.L.items.push({ x: 1, y: 1, it: makeItem('dagger') });
+  logClear();
+  msg('YOU DESCEND INTO THE CRYPTS OF VAEL.');
+  msg('SOMEWHERE BELOW, THE HOLLOW KING GUARDS THE EMBER CROWN.');
+  msg('TRY: PULL LEFT TORCH, USE LEFT, GET RIGHT DAGGER');
+  msg('MAZE SEED: ' + seed + '   (ENTER THIS SEED TO PLAY THE SAME MAZE)');
+  if (seed === 0) msg('TEST MAZE: ONE OF EVERY MONSTER SLEEPS ALONG THE PATH AHEAD. STRIKE ONE TO WAKE IT.');
+}
+function enterLevel(n, entry) {
+  G.lvl = n;
+  if (!G.levels[n]) G.levels[n] = makeLevel(n);   // build once, then keep its state between visits
+  G.L = G.levels[n]; G.anim = null;
+  let px = 1, py = 1;
+  if (entry === 'stairs' && G.L.stairs) { px = G.L.stairs.x; py = G.L.stairs.y; }   // arrive at the down-ladder when climbing up
+  G.p = { x: px, y: py, dir: 0 };
+  for (let d = 0; d < 4; d++) if (!isWall(px + DX[d], py + DY[d])) { G.p.dir = d; break; }
+  G.pdist = bfs(G.L, px, py);
+  G.view = 'main';
+}
+
+// ---------- save / load ----------
+// The whole game (all visited levels, your inventory, rank, position) is stored in the browser's
+// localStorage, which holds far more than a cookie could. One save slot.
+const SAVE_KEY = 'vael-save';
+function typedReplacer(key, val) {
+  if (val instanceof Uint8Array) return { __t: 'u8', d: Array.from(val) };
+  if (val instanceof Int16Array) return { __t: 'i16', d: Array.from(val) };
+  return val;
+}
+function typedReviver(key, val) {
+  if (val && val.__t === 'u8') return Uint8Array.from(val.d);
+  if (val && val.__t === 'i16') return Int16Array.from(val.d);
+  return val;
+}
+function hasSave() { try { return !!localStorage.getItem(SAVE_KEY); } catch (e) { return false; } }
+function saveGame() {
+  if (!G || G.state !== 'play') { msg('YOU CAN ONLY SAVE WHILE EXPLORING.'); return; }
+  if (G.pending) return;
+  try {
+    const snap = {};
+    for (const k in G) if (k !== 'L' && k !== 'pdist') snap[k] = G[k];   // L and pdist are rebuilt on load
+    localStorage.setItem(SAVE_KEY, JSON.stringify(snap, typedReplacer));
+    msg('GAME SAVED. (TYPE LOAD TO RESUME IT LATER.)');
+  } catch (e) { msg('COULD NOT SAVE - BROWSER STORAGE IS BLOCKED.'); }
+}
+function loadGame() {
+  let raw; try { raw = localStorage.getItem(SAVE_KEY); } catch (e) { raw = null; }
+  if (!raw) { msg('NO SAVED GAME FOUND.'); return false; }
+  let d; try { d = JSON.parse(raw, typedReviver); } catch (e) { msg('THE SAVED GAME IS CORRUPT.'); return false; }
+  stopMusic(); musicState = null;
+  G = d;
+  G.L = G.levels[G.lvl];
+  G.pdist = bfs(G.L, G.p.x, G.p.y);
+  const now = performance.now();           // rebuild timing afresh so nothing is stuck in the past
+  Object.assign(G, { lastMove: 0, lastHurt: 0, nextWarn: 0, nextBeat: 0, beatT: now, nextSound: 0,
+    atkReady: [0, 0], flash: 0, swing: null, anim: null, fatigue: 0, strain: 0, regen: 0,
+    pending: null, fainted: false, view: 'main', state: 'play' });
+  for (const n in G.levels) for (const m of G.levels[n].mons) { m.nextMove = 0; m.nextAtk = 0; m.nextCry = 0; m.hurt = 0; }
+  logClear();
+  msg('GAME LOADED - DEPTH ' + G.lvl + ', ' + Math.max(0, G.hp) + '/' + G.maxhp + ' HEALTH, RANK ' + xpRank() + '.');
+  cmd.placeholder = '';
+  return true;
+}
+// ---------- messages ----------
+const logEl = document.getElementById('log');
+let logLines = [];
+function msg(s) { logLines.push(s); if (logLines.length > 6) logLines.shift(); drawLog(); }
+function logClear() { logLines = []; drawLog(); }
+function drawLog() {
+  logEl.innerHTML = '';
+  logLines.forEach((s, i) => { const d = document.createElement('div'); d.textContent = s; if (i < logLines.length - 2) d.className = 'old'; logEl.appendChild(d); });
+}
+
+// ---------- commands ----------
+const VERBS = ['MOVE', 'REVEAL', 'TURN', 'ATTACK', 'GET', 'DROP', 'STOW', 'PULL', 'USE', 'LOOK', 'EXAMINE', 'DESCEND', 'ASCEND', 'SAVE', 'LOAD', 'PAUSE', 'HELP', 'SOUND', 'MUSIC', 'SEED', 'ANIMATE', 'X'];
+// These commands must be typed in full, so a stray letter can't open the test map views.
+const FULL_WORD_ONLY = ['REVEAL'];
+function matchWord(tok, list) { return list.find(w => FULL_WORD_ONLY.includes(w) ? w === tok : w.startsWith(tok)); }
+function handArg(tok) {
+  if (!tok) return -1;
+  if ('LEFT'.startsWith(tok)) return 0;
+  if ('RIGHT'.startsWith(tok)) return 1;
+  return -1;
+}
+function itemMatches(it, words) {
+  if (!words.length) return true;
+  const names = it.name.split(' ').concat([it.kind.toUpperCase()]);
+  return words.every(w => names.some(n => n.startsWith(w)));
+}
+function exec(line) {
+  const t = line.trim().toUpperCase().split(/\s+/).filter(Boolean);
+  if (!t.length) return;
+  if (G.paused) {                                   // any command un-pauses; a bare PAUSE just resumes
+    G.paused = false; msg('GAME RESUMED.');
+    if (matchWord(t[0], VERBS) === 'PAUSE') return;
+  }
+  if (G.fainted) { msg('YOU ARE UNCONSCIOUS...'); return; }
+  // Waiting for an answer to "start over in a new maze?"
+  if (G.pending) {
+    if ('YES'.startsWith(t[0])) { const sd = G.pending.seed; G.pending = null; newGame(sd); }
+    else if ('NO'.startsWith(t[0])) { G.pending = null; msg('YOU STAY WHERE YOU ARE.'); }
+    else msg('START OVER IN MAZE ' + G.pending.seed + '? ANSWER Y OR N.');
+    return;
+  }
+  // A new seed typed during play: a bare number, or SEED <number/word>
+  const seedArg = /^\d+$/.test(t[0]) && t.length === 1 ? t[0]
+                : t.length > 1 && t[0].length >= 2 && 'SEED'.startsWith(t[0]) ? t.slice(1).join(' ') : null;
+  if (seedArg !== null) {
+    G.pending = { seed: parseSeed(seedArg) };
+    msg('START OVER IN MAZE ' + G.pending.seed + '? (Y/N)  N KEEPS YOUR CURRENT GAME.');
+    return;
+  }
+  const v = matchWord(t[0], VERBS);
+  if (!v) { msg('???  (TYPE HELP)'); return; }
+  const h = handArg(t[1]);
+  const needHand = () => { if (h < 0) { msg(v + ' LEFT OR RIGHT?'); return true; } return false; };
+  const HN = ['LEFT', 'RIGHT'];
+  switch (v) {
+    case 'MOVE': {
+      let d = G.p.dir;
+      if (t[1]) {
+        if ('BACK'.startsWith(t[1])) d = (d + 2) % 4;
+        else if (h === 0) d = (d + 3) % 4;
+        else if (h === 1) d = (d + 1) % 4;
+      }
+      move(d); break;
+    }
+    case 'TURN': {
+      const a = t[1] || '', fromDir = G.p.dir;
+      let sign;
+      if (a && ('AROUND'.startsWith(a) || 'BACK'.startsWith(a))) { G.p.dir = (G.p.dir + 2) % 4; sign = 1; }
+      else if (h === 0) { G.p.dir = (G.p.dir + 3) % 4; sign = -1; }
+      else if (h === 1) { G.p.dir = (G.p.dir + 1) % 4; sign = 1; }
+      else { msg('TURN LEFT, RIGHT OR AROUND?'); return; }
+      const steps = (G.p.dir - fromDir + 4) % 4 === 2 ? 2 : 1;   // turning around = two quarter turns
+      G.anim = { type: 'turn', fromDir, sign, steps, t0: performance.now(), dur: TURN_MS * steps };
+      mapSafeView(); break;
+    }
+    case 'ATTACK': if (needHand()) return; attack(h); break;
+    case 'GET': {
+      if (needHand()) return;
+      if (G.hands[h]) { msg('YOUR ' + HN[h] + ' HAND IS FULL.'); return; }
+      // An object that shares a square with a monster can't be taken until the monster is dead.
+      const words = t.slice(2), guard = monAt(G.p.x, G.p.y);
+      if (guard) { msg('THE ' + guard.name + ' IS IN THE WAY. KILL IT FIRST.'); return; }
+      const here = itemsAt(G.p.x, G.p.y).filter(o => itemMatches(o.it, words));
+      if (!here.length) {
+        const ax = G.p.x + DX[G.p.dir], ay = G.p.y + DY[G.p.dir], m = monAt(ax, ay);
+        const guarded = m && (itemsAt(ax, ay).some(o => itemMatches(o.it, words)) || (m.carry && itemMatches(m.carry, words)));
+        msg(guarded ? 'THE ' + m.name + ' GUARDS IT. KILL IT FIRST.' : 'NOTHING LIKE THAT HERE.');
+        return;
+      }
+      const o = here[0]; G.L.items.splice(G.L.items.indexOf(o), 1);
+      G.hands[h] = o.it; SFX.get();
+      if (!o.it.xpDone && o.it.type !== 'goal') { o.it.xpDone = true; gainXP(XP_PER_ITEM); }
+      msg('YOU TAKE THE ' + o.it.name + ' IN YOUR ' + HN[h] + ' HAND.');
+      if (o.it.type === 'goal') win();
+      break;
+    }
+    case 'DROP': {
+      if (needHand()) return;
+      const it = G.hands[h]; if (!it) { msg('YOUR ' + HN[h] + ' HAND IS EMPTY.'); return; }
+      G.hands[h] = null; G.L.items.push({ x: G.p.x, y: G.p.y, it });
+      msg('YOU DROP THE ' + it.name + '.'); break;
+    }
+    case 'STOW': {
+      if (needHand()) return;
+      const it = G.hands[h]; if (!it) { msg('YOUR ' + HN[h] + ' HAND IS EMPTY.'); return; }
+      if (G.pack.length >= PACK_MAX) { msg('YOUR PACK IS FULL.'); return; }
+      G.hands[h] = null; G.pack.push(it); msg('YOU STOW THE ' + it.name + '.'); break;
+    }
+    case 'PULL': {
+      if (needHand()) return;
+      if (G.hands[h]) { msg('YOUR ' + HN[h] + ' HAND IS FULL.'); return; }
+      const i = G.pack.findIndex(it => itemMatches(it, t.slice(2)));
+      if (i < 0) { msg(G.pack.length ? 'NO SUCH THING IN YOUR PACK.' : 'YOUR PACK IS EMPTY.'); return; }
+      G.hands[h] = G.pack.splice(i, 1)[0]; SFX.get();
+      msg('YOU PULL OUT THE ' + G.hands[h].name + '.'); break;
+    }
+    case 'USE': {
+      if (h >= 0) { use(h); break; }
+      const words = t.slice(1);
+      if (!words.length) { msg('USE LEFT, RIGHT, OR AN ITEM NAME.'); break; }
+      const hi = G.hands.findIndex(it => it && itemMatches(it, words));
+      if (hi >= 0) { use(hi); break; }
+      const pi = G.pack.findIndex(it => itemMatches(it, words));
+      if (pi >= 0) { usePack(pi); break; }
+      msg('YOU HAVE NO SUCH THING TO USE.'); break;
+    }
+    case 'LOOK': G.view = 'main'; break;
+    case 'REVEAL': G.view = 'full'; break;
+    case 'EXAMINE': G.view = 'pack'; break;
+    case 'DESCEND': {
+      const s = G.L.stairs;
+      if (!s || s.x !== G.p.x || s.y !== G.p.y) { msg('THERE IS NO WAY DOWN HERE.'); return; }
+      SFX.descend(); enterLevel(G.lvl + 1);
+      msg('YOU CLIMB DOWN TO DEPTH ' + G.lvl + '.');
+      if (G.lvl === LEVELS.length) msg('THE AIR HERE IS COLD AS A TOMB.');
+      break;
+    }
+    case 'ASCEND': {
+      const u = G.L.up;
+      if (!u || u.x !== G.p.x || u.y !== G.p.y) { msg('THERE IS NO WAY UP HERE.'); return; }
+      SFX.descend(); enterLevel(G.lvl - 1, 'stairs');
+      msg('YOU CLIMB UP TO DEPTH ' + G.lvl + '.');
+      break;
+    }
+    case 'PAUSE': G.paused = true; fadeMusicOut(); msg('GAME PAUSED. ENTER ANY COMMAND TO RESUME.'); break;
+    case 'SAVE': saveGame(); break;
+    case 'LOAD': loadGame(); break;
+    case 'X': testKill(); break;
+    case 'ANIMATE':
+      animOn = !animOn; G.anim = null;
+      try { localStorage.setItem('vael-animate', animOn ? 'on' : 'off'); } catch (e) { /* ignore */ }
+      msg('MOVEMENT ANIMATION ' + (animOn ? 'ON' : 'OFF') + '.'); break;
+    case 'SEED': msg('MAZE SEED: ' + G.seed + '   (TYPE SEED <NUMBER> TO START A NEW MAZE)'); break;
+    case 'SOUND': soundOn = !soundOn; msg('SOUND ' + (soundOn ? 'ON' : 'OFF') + '.'); break;
+    case 'MUSIC': {
+      const arg = t[1];
+      if (arg !== undefined && /^[0-9]$/.test(arg)) {
+        musicVol = +arg;
+        if (musicVol > 0) lastMusicVol = musicVol;
+        if (musicVol === 0) { fadeMusicOut(); msg('MUSIC OFF.'); }
+        else msg('MUSIC VOLUME ' + musicVol + ' (0-9).');
+      } else if (musicVol > 0) {
+        lastMusicVol = musicVol; musicVol = 0; fadeMusicOut(); msg('MUSIC OFF.');
+      } else {
+        musicVol = lastMusicVol || 6; msg('MUSIC ON, VOLUME ' + musicVol + ' (0-9).');
+      }
+      break;
+    }
+    case 'HELP':
+      msg('MOVE [BACK|LEFT|RIGHT]   TURN LEFT|RIGHT|AROUND   ATTACK L|R   DESCEND  ASCEND');
+      msg('GET L|R [ITEM]  DROP L|R  STOW L|R  PULL L|R ITEM  USE L|R|ITEM');
+      msg('USE MAP SHOWS WHERE YOU HAVE BEEN (YOU START WITH A MAP IN YOUR PACK).');
+      msg('SAVE  LOAD  PAUSE  EXAMINE (PACK)  LOOK  SEED  SOUND  MUSIC [0-9]  ANIMATE.  WORDS MAY BE ABBREVIATED.');
+      msg('EVERY STEP TIRES YOU; HURRYING TIRES YOU MORE. STAND STILL TO RECOVER.');
+      break;
+  }
+}
+// Overhead test views (explored / full) stay open while moving or fighting; other views close.
+function mapSafeView() { if (G.view !== 'explored' && G.view !== 'full') G.view = 'main'; }
+function markSeen() {
+  const L = G.L, S = L.S, p = G.p, fd = p.dir, range = lightRange();
+  const mark = (x, y) => { if (x >= 0 && y >= 0 && x < S && y < S) L.seen[y * S + x] = 1; };
+  for (let d = 0; d <= range; d++) {
+    const x = p.x + DX[fd] * d, y = p.y + DY[fd] * d;
+    if (isWall(x, y)) break;
+    mark(x, y);
+    for (const sd of [(fd + 1) % 4, (fd + 3) % 4]) mark(x + DX[sd], y + DY[sd]);
+  }
+}
+function move(d) {
+  const nx = G.p.x + DX[d], ny = G.p.y + DY[d];
+  if (isWall(nx, ny)) {
+    // walking into stone hurts
+    const now = performance.now(), d = rnd(2, 4);
+    SFX.thud(); G.flash = now + 120; G.hp -= d; G.lastHurt = now;
+    if (G.hp <= 0) { die('YOU DASH YOURSELF AGAINST THE STONE.'); return; }
+    checkFaint();
+    msg('YOU WALK INTO A STONE WALL. OUCH!');
+    return;
+  }
+  const m = monAt(nx, ny);                          // monsters don't block: you can share their square
+  const now = performance.now();
+  if (now - G.lastMove < 120) return;          // can't move faster than ~8 steps/second
+  G.lastMove = now;
+  exert(now);
+  if (G.state !== 'play') return;
+  if (d === G.p.dir || d === (G.p.dir + 2) % 4)
+    G.anim = { type: 'move', from: { x: G.p.x, y: G.p.y, dir: G.p.dir }, back: d !== G.p.dir, t0: now, dur: MOVE_MS };
+  else G.anim = null;                               // sideways steps are instant
+  if (m) msg(m.dormant ? 'THE ' + m.name + ' SLEEPS RIGHT HERE.' : 'YOU ARE FACE TO FACE WITH THE ' + m.name + '!');
+  G.p.x = nx; G.p.y = ny; mapSafeView(); SFX.step();
+  G.pdist = bfs(G.L, nx, ny);
+  const here = itemsAt(nx, ny);
+  if (here.length) msg('YOU SEE ' + here.map(o => aName(o.it)).join(', ') + ' HERE.');
+  if (G.L.stairs && G.L.stairs.x === nx && G.L.stairs.y === ny) msg('A LADDER LEADS DOWN INTO THE DARK. (DESCEND)');
+  if (G.L.up && G.L.up.x === nx && G.L.up.y === ny) msg('A LADDER LEADS UP TO THE LEVEL ABOVE. (ASCEND)');
+}
+// At FAINT_HP health or less you black out: the screen goes blank and you can't act
+// until resting brings you back above FAINT_HP. Monsters can still attack you while you're out.
+const FAINT_HP = 20;
+function checkFaint() {
+  if (G.state !== 'play') return;
+  if (!G.fainted && G.hp > 0 && G.hp <= FAINT_HP) {
+    G.fainted = true; G.anim = null; G.view = 'main';
+    msg('YOUR VISION DIMS... YOU FAINT!');
+  } else if (G.fainted && G.hp > FAINT_HP) {
+    G.fainted = false; msg('YOU COME TO YOUR SENSES.');
+  }
+}
+// Each step costs a little health; rapid steps build fatigue, which raises the cost per step.
+function exert(now) {
+  G.fatigue = Math.min(60, G.fatigue + 1);
+  // Tuned so: 1-2 steps/s costs ~10 health per 20 steps; 3 steps/s would kill in ~25 steps,
+  // 4 steps/s in ~20, and ~8 steps/s in ~15 (you faint at 20 health before that happens).
+  G.strain += 0.355 + 0.02 * G.fatigue + 0.125 * G.fatigue * G.fatigue;
+  while (G.strain >= 1) { G.strain -= 1; G.hp -= 1; }
+  if (G.hp <= 0) { die('YOUR HEART BURSTS FROM EXERTION.'); return; }
+  checkFaint();
+  if (now > G.nextWarn) {
+    if (G.fatigue >= 8) { msg('YOUR HEART HAMMERS. YOU MUST REST!'); G.nextWarn = now + 3000; }
+    else if (G.fatigue >= 4) { msg('YOU ARE BREATHING HARD.'); G.nextWarn = now + 4000; }
+  }
+}
+// Apply an item's effect. `consume` removes it from wherever it was (hand or pack);
+// the map is not consumed, so it stays available until you drop it.
+function applyUse(it, consume) {
+  switch (it.type) {
+    case 'light':
+      G.light = { name: it.name, range: it.range, rem: it.dur, max: it.dur };
+      consume(); msg('THE ' + it.name + ' FLARES TO LIFE.'); break;
+    case 'potion':
+      consume();
+      if (it.heal) { G.hp = Math.min(G.maxhp, G.hp + it.heal); msg('WARMTH FLOODS YOUR BODY.'); }
+      if (it.max) { G.maxhp += it.max; G.hp += it.max; msg('YOU FEEL STRONGER. YOUR HEART STEADIES.'); }
+      SFX.get(); break;
+    case 'treasure':
+      consume(); gainXP(it.xp || 10); SFX.get(); msg('ANCIENT POWER FLOWS INTO YOU.'); break;
+    case 'map':
+      G.view = 'explored'; msg('YOU UNFOLD YOUR MAP. (LOOK TO PUT IT AWAY)'); break;
+    case 'weapon': case 'shield': msg('USE ATTACK TO FIGHT WITH IT.'); break;
+    default: msg('NOTHING HAPPENS.');
+  }
+}
+function use(h) {
+  const it = G.hands[h];
+  if (!it) { msg('YOUR ' + ['LEFT', 'RIGHT'][h] + ' HAND IS EMPTY.'); return; }
+  applyUse(it, () => { G.hands[h] = null; });
+}
+function usePack(i) { applyUse(G.pack[i], () => { G.pack.splice(i, 1); }); }
+function attack(h) {
+  const now = performance.now();
+  if (now < G.atkReady[h]) { msg('YOUR ARM IS NOT READY.'); return; }
+  const it = G.hands[h];
+  let dmg = [1, 3], hit = 0.85, cd = 650;
+  if (it && it.type === 'weapon') { dmg = it.dmg; hit = it.hit; cd = it.cd; }
+  else if (it && it.type === 'shield') { dmg = [2, 5]; cd = 900; }
+  G.atkReady[h] = now + cd; G.swing = { t: now, h, it }; SFX.swing(); mapSafeView();
+  if (G.hp > 1) { G.hp -= 1; checkFaint(); }   // swinging is exertion
+  const m = monAt(G.p.x, G.p.y) || monAt(G.p.x + DX[G.p.dir], G.p.y + DY[G.p.dir]);   // your square first, then ahead
+  if (!m) { msg('YOU SWING AT EMPTY AIR.'); return; }
+  if (m.dormant) { m.dormant = false; m.nextMove = now + 600; msg('THE ' + m.name + ' AWAKENS!'); }
+  if (Math.random() > hit) { msg('YOU MISS THE ' + m.name + '.'); return; }
+  const d = rnd(dmg[0], dmg[1]) + strikeBonus();
+  m.hp -= d; m.hurt = now + 220; SFX.hit();
+  if (m.hp <= 0) killMonster(m);
+  else msg('YOU HIT THE ' + m.name + '!');
+}
+function killMonster(m) {
+  G.L.mons.splice(G.L.mons.indexOf(m), 1); SFX.kill(); G.kills++;
+  gainXP(XP_PER_KILL[m.k] || 4);
+  G.maxhp = Math.min(250, G.maxhp + 4);
+  msg('THE ' + m.name + ' CRUMBLES AND IS GONE!');
+  if (m.carry) { G.L.items.push({ x: m.x, y: m.y, it: m.carry }); msg('IT DROPS ' + aName(m.carry) + '!'); }
+  if (m.k === 'king') {
+    G.L.items.push({ x: m.x, y: m.y, it: makeItem('crown') });
+    msg('SOMETHING GLOWS WHERE THE KING FELL...');
+  }
+}
+// TEST COMMAND (X): instantly kill the monster in front, or failing that any monster next to you.
+function testKill() {
+  const front = monAt(G.p.x, G.p.y) || monAt(G.p.x + DX[G.p.dir], G.p.y + DY[G.p.dir]);
+  const m = front || [0, 1, 2, 3].map(d => monAt(G.p.x + DX[d], G.p.y + DY[d])).find(Boolean);
+  if (!m) { msg('X: NO MONSTER NEXT TO YOU.'); return; }
+  G.swing = { t: performance.now(), h: 1, it: G.hands[1] }; mapSafeView();
+  killMonster(m);
+}
+function win() { G.state = 'won'; G.view = 'main'; fadeMusicOut(); TUNES.victory(); msg('THE CROWN BURNS WARM IN YOUR HAND. YOU HAVE WON!'); msg('TYPE RESTART AND PRESS ENTER TO RETURN TO THE TITLE.'); }
+function die(why) { G.state = 'dead'; G.hp = 0; fadeMusicOut(); TUNES.death(); if (why) msg(why); msg('YOUR HEART FALLS SILENT. YOU HAVE PERISHED.'); msg('TYPE RESTART AND PRESS ENTER TO RETURN TO THE TITLE.'); }
+
+// ---------- simulation ----------
+function lightRange() {
+  if (!G.light) return 1;
+  return Math.max(1, Math.ceil(G.light.range * Math.min(1, G.light.rem / 45)));
+}
+let lastT = 0;
+function update(now) {
+  const dt = Math.max(0, Math.min(100, now - (lastT || now))); lastT = now;
+  if (G.state !== 'play' || G.pending) return;   // paused while asking about a new seed
+  if (G.paused) { musicState = null; return; }   // frozen by the PAUSE command
+  musicTick();
+  markSeen();
+  // heartbeat
+  const ratio = Math.max(0.02, G.hp / G.maxhp);
+  if (now >= G.nextBeat) {
+    // ~55 bpm at full health, racing toward ~330 bpm near death; exertion speeds it up further
+    const period = Math.max(150, (180 + 920 * Math.pow(ratio, 1.5)) / (1 + G.fatigue / 6));
+    G.beatT = now; SFX.beat(Math.min(0.14, period * 0.35 / 1000)); G.nextBeat = now + period;
+  }
+  G.fatigue = Math.max(0, G.fatigue - 2 * dt / 1000);
+  // light
+  if (G.light) {
+    G.light.rem -= dt / 1000;
+    if (G.light.rem <= 0) { msg('YOUR ' + G.light.name + ' GUTTERS OUT. DARKNESS.'); G.light = null; }
+  }
+  // regeneration
+  // resting (not hurt for 3s, standing still for 1.5s) restores 1 health every 2 seconds
+  if (now - G.lastHurt > 3000 && now - G.lastMove > 1500 && G.fatigue < 5 && G.hp < G.maxhp) {
+    G.regen = (G.regen || 0) + dt;
+    if (G.regen >= 2000) { G.regen = 0; G.hp++; }
+  }
+  checkFaint();
+  // monsters
+  const S = G.L.S, pd = G.pdist;
+  for (const m of G.L.mons) {
+    // each monster calls out now and then; sleeping ones less often
+    if (!m.nextCry) m.nextCry = now + Math.random() * m.cry;
+    if (now >= m.nextCry) {
+      m.nextCry = now + m.cry * (0.7 + Math.random() * 0.6) * (m.dormant ? 2 : 1);
+      monsterCry(m, cryLevel(pd[m.y * S + m.x]));
+    }
+    const i = m.y * S + m.x, dist = pd[i];
+    if (m.dormant) {                                 // a sleeping monster wakes when you come right up to it
+      if (dist === 0 || dist === 1) { m.dormant = false; m.nextMove = now + 400; m.nextAtk = now + 600; msg('THE ' + m.name + ' STIRS AND NOTICES YOU!'); }
+      continue;
+    }
+    if (now < m.nextMove) continue;
+    m.nextMove = now + m.move * (0.8 + Math.random() * 0.4);
+    if (dist === 0 || dist === 1) {
+      // step into the player's square if nobody else is there, otherwise fight from here
+      if (dist === 1 && !monAt(G.p.x, G.p.y)) { m.x = G.p.x; m.y = G.p.y; m.nextAtk = Math.max(m.nextAtk, now + 500); continue; }
+      if (now >= m.nextAtk) { m.nextAtk = now + m.atk; monsterAttack(m); }
+      continue;
+    }
+    const sight = G.light ? 20 : 6;               // monsters see a lit player much farther down a hall
+    const seesPlayer = dist > 0 && dist <= sight && lineOfSight(m);
+    const chase = seesPlayer || (dist > 0 && dist <= 14 + G.lvl * 2);
+    const opts = [];
+    for (let d = 0; d < 4; d++) {
+      const nx = m.x + DX[d], ny = m.y + DY[d];
+      if (isWall(nx, ny) || monAt(nx, ny)) continue;
+      if (chase && pd[ny * S + nx] >= dist) continue;
+      opts.push([nx, ny]);
+    }
+    if (opts.length && (chase || Math.random() < 0.6)) {
+      const [nx, ny] = pick(opts); m.x = nx; m.y = ny;
+      if (pd[ny * S + nx] === 1) m.nextAtk = Math.max(m.nextAtk, now + 500);
+    }
+    if (chase && dist <= 5 && now > G.nextSound) {
+      G.nextSound = now + 9000; msg('YOU HEAR ' + m.sound + ' NEARBY...');
+    }
+  }
+}
+function monsterAttack(m) {
+  monsterCry(m, 1);                                  // full-volume cry as it attacks
+  m.nextCry = performance.now() + m.cry;
+  const rel = m.x === G.p.x && m.y === G.p.y ? 0 : (dirTo(m) - G.p.dir + 4) % 4;   // same square counts as in front
+  const where = ['', ' FROM YOUR RIGHT', ' FROM BEHIND', ' FROM YOUR LEFT'][rel];
+  if (Math.random() > m.hit) { msg('THE ' + m.name + ' LUNGES' + where + ' AND MISSES.'); return; }
+  if (Math.random() < evasion()) { msg('YOU DEFTLY DODGE THE ' + m.name + where + '.'); return; }
+  let d = rnd(m.dmg[0], m.dmg[1]);
+  const block = Math.max(...G.hands.map(it => it && it.type === 'shield' ? it.block : 0));
+  if (block && rel === 0) d = Math.max(1, Math.round(d * (1 - block)));
+  G.hp -= d; G.lastHurt = performance.now(); G.flash = G.lastHurt + 160; SFX.hurt();
+  msg((rel === 0 ? 'THE ' + m.name : 'SOMETHING') + ' STRIKES' + where + '!' + (block && rel === 0 ? ' (BLOCKED SOME)' : ''));
+  if (G.hp <= 0) die(); else checkFaint();
+}
+// ---------- experience ----------
+// XP comes from kills and from picking up items. Rank rises with XP; higher rank means
+// harder strikes (bonus damage) and better evasion (chance to dodge a monster's blow).
+const XP_PER_KILL = { mould: 2, crawler: 4, toad: 6, hound: 10, wraith: 10, golem: 20, king: 45 };
+const XP_PER_ITEM = 3;
+function xpRank() { return Math.min(10, Math.floor(G.xp / 25)); }   // 0,25,50,... capped at 10
+function strikeBonus() { return xpRank(); }                        // extra damage per hit
+function evasion() { return Math.min(0.5, xpRank() * 0.05); }      // chance to dodge an attack
+function gainXP(n) {
+  G.xp += n;
+  const r = xpRank();
+  if (r > G.lastRank) { G.lastRank = r; msg('YOU GROW MORE SKILLED!  (RANK ' + r + ')'); }
+}
+// Can the monster see the player straight down a hall (same row/column, nothing between)?
+function lineOfSight(m) {
+  if (m.x !== G.p.x && m.y !== G.p.y) return false;
+  const dx = Math.sign(G.p.x - m.x), dy = Math.sign(G.p.y - m.y);
+  let x = m.x + dx, y = m.y + dy;
+  while (x !== G.p.x || y !== G.p.y) { if (isWall(x, y)) return false; x += dx; y += dy; }
+  return true;
+}
+function dirTo(m) {
+  const dx = m.x - G.p.x, dy = m.y - G.p.y;
+  if (dy < 0) return 0; if (dx > 0) return 1; if (dy > 0) return 2; return 3;
+}
+
+// ---------- vector shapes ----------
+function ell(cx, cy, rx, ry, n = 18, a0 = 0, a1 = Math.PI * 2) {
+  const p = []; for (let i = 0; i <= n; i++) { const a = a0 + (a1 - a0) * i / n; p.push([cx + Math.cos(a) * rx, cy + Math.sin(a) * ry]); } return p;
+}
+const mir = poly => poly.map(([x, y]) => [-x, y]);
+const box = (x0, y0, x1, y1) => [[x0, y0], [x1, y0], [x1, y1], [x0, y1], [x0, y0]];
+function drawPolys(polys, ox, oy, s, a, fill = true, rgb = FG) {
+  ctx.strokeStyle = col(a, rgb); ctx.fillStyle = '#000';
+  for (const p of polys) {
+    ctx.beginPath();
+    p.forEach(([x, y], i) => { const X = ox + x * s, Y = oy - y * s; i ? ctx.lineTo(X, Y) : ctx.moveTo(X, Y); });
+    const f = p[0], l = p[p.length - 1];
+    if (fill && p.length > 3 && Math.abs(f[0] - l[0]) < 1e-6 && Math.abs(f[1] - l[1]) < 1e-6) ctx.fill();
+    ctx.stroke();
+  }
+}
+const ICON = {
+  dagger: () => [
+    [[-0.05, 0.24], [-0.045, 0.55], [0, 0.8], [0.045, 0.55], [0.05, 0.24], [-0.05, 0.24]],
+    [[0, 0.26], [0, 0.72]],
+    box(-0.17, 0.2, 0.17, 0.26),
+    [[-0.2, 0.26], [-0.17, 0.3]], [[0.2, 0.26], [0.17, 0.3]],
+    [[-0.03, 0.2], [-0.03, 0.07], [0.03, 0.07], [0.03, 0.2]],
+    [[-0.03, 0.15], [0.03, 0.13]], [[-0.03, 0.11], [0.03, 0.09]],
+    ell(0, 0.05, 0.045, 0.045, 10),
+  ],
+  sword: () => [
+    [[-0.06, 0.28], [-0.05, 0.72], [0, 1.02], [0.05, 0.72], [0.06, 0.28], [-0.06, 0.28]],
+    [[0, 0.3], [0, 0.92]],
+    box(-0.22, 0.24, 0.22, 0.3),
+    [[-0.22, 0.3], [-0.26, 0.36]], [[0.22, 0.3], [0.26, 0.36]],
+    [[-0.035, 0.24], [-0.035, 0.07], [0.035, 0.07], [0.035, 0.24]],
+    [[-0.035, 0.18], [0.035, 0.16]], [[-0.035, 0.13], [0.035, 0.11]],
+    ell(0, 0.05, 0.055, 0.055, 10),
+  ],
+  hammer: () => [
+    [[-0.03, 0], [-0.03, 0.64], [0.03, 0.64], [0.03, 0], [-0.03, 0]],
+    [[0, 0.04], [0, 0.6]],
+    box(-0.26, 0.6, 0.26, 0.96),
+    [[-0.26, 0.7], [0.26, 0.7]], [[-0.26, 0.86], [0.26, 0.86]],
+    [[0.26, 0.82], [0.42, 0.86], [0.42, 0.74], [0.26, 0.74]],
+    [[-0.26, 0.78], [-0.34, 0.78]],
+  ],
+  rune: () => [
+    [[-0.07, 0.28], [-0.05, 0.74], [0, 1.08], [0.05, 0.74], [0.07, 0.28], [-0.07, 0.28]],
+    [[0, 0.3], [0, 0.98]],
+    [[0, 0.44], [0.04, 0.54], [-0.04, 0.66], [0.04, 0.78], [0, 0.88]],
+    [[-0.26, 0.26], [-0.2, 0.34], [0.2, 0.34], [0.26, 0.26], [0.22, 0.22], [-0.22, 0.22], [-0.26, 0.26]],
+    [[-0.035, 0.22], [-0.035, 0.06], [0.035, 0.06], [0.035, 0.22]],
+    ell(0, 0.05, 0.055, 0.055, 6),
+  ],
+  buckler: () => {
+    const P = [ell(0, 0.36, 0.34, 0.34, 22), ell(0, 0.36, 0.27, 0.27, 20), ell(0, 0.36, 0.09, 0.09, 12)];
+    for (let i = 0; i < 6; i++) { const a = i / 6 * 6.283; P.push(ell(0.3 * Math.cos(a), 0.36 + 0.3 * Math.sin(a), 0.022, 0.022, 6)); }
+    return P;
+  },
+  tower: () => [
+    [[-0.3, 0.08], [-0.3, 0.76], [0, 0.9], [0.3, 0.76], [0.3, 0.08], [0, -0.02], [-0.3, 0.08]],
+    [[-0.24, 0.12], [-0.24, 0.73], [0, 0.84], [0.24, 0.73], [0.24, 0.12], [0, 0.04], [-0.24, 0.12]],
+    [[0, 0.06], [0, 0.82]], [[-0.24, 0.44], [0.24, 0.44]],
+    ell(0, 0.44, 0.06, 0.06, 10),
+    ell(-0.17, 0.2, 0.02, 0.02, 6), ell(0.17, 0.2, 0.02, 0.02, 6), ell(-0.17, 0.66, 0.02, 0.02, 6), ell(0.17, 0.66, 0.02, 0.02, 6),
+  ],
+  torch: t => {
+    const fl = 0.03 * Math.sin(t / 90), fl2 = 0.05 * Math.sin(t / 70);
+    return [
+      [[-0.05, 0], [-0.06, 0.42], [0.06, 0.42], [0.05, 0], [-0.05, 0]],
+      [[-0.055, 0.1], [0.055, 0.12]], [[-0.06, 0.21], [0.06, 0.19]], [[-0.06, 0.32], [0.06, 0.3]],
+      [[-0.1, 0.42], [0.1, 0.42]],
+      [[-0.12, 0.44], [-0.14 + fl, 0.58], [-0.07, 0.68], [-0.03, 0.62], [0, 0.95 + fl2], [0.04, 0.6], [0.09, 0.7], [0.14, 0.56], [0.12, 0.44]],
+      [[-0.05, 0.48], [-0.06 + fl, 0.6], [0, 0.78 + fl2], [0.06, 0.6], [0.05, 0.48]],
+    ];
+  },
+  lantern: () => [
+    ell(0, 0.63, 0.05, 0.035, 10),
+    [[-0.1, 0.5], [0, 0.58], [0.1, 0.5]],
+    box(-0.16, 0.1, 0.16, 0.5),
+    [[-0.16, 0.1], [-0.2, 0], [0.2, 0], [0.16, 0.1]],
+    [[-0.07, 0.46], [-0.07, 0.14]], [[0.07, 0.46], [0.07, 0.14]],
+    [[-0.16, 0.3], [0.16, 0.3]],
+    [[-0.05, 0.14], [0, 0.34], [0.05, 0.14], [-0.05, 0.14]],
+  ],
+  mending: () => [
+    [[-0.08, 0.56], [-0.08, 0.42], [-0.22, 0.26], [-0.22, 0.05], [0.22, 0.05], [0.22, 0.26], [0.08, 0.42], [0.08, 0.56], [-0.08, 0.56]],
+    [[-0.22, 0.2], [0.22, 0.2]],
+    box(-0.06, 0.56, 0.06, 0.65),
+    [[-0.06, 0.65], [0.06, 0.65]],
+    ell(-0.08, 0.13, 0.03, 0.03, 8), ell(0.07, 0.11, 0.02, 0.02, 6), ell(0.01, 0.16, 0.015, 0.015, 6),
+    [[-0.16, 0.12], [-0.12, 0.18]],
+  ],
+  herb: () => [
+    [[0, 0.02], [0, 0.6]],
+    [[0, 0.18], [-0.22, 0.28], [-0.1, 0.4], [0, 0.24]],
+    [[0, 0.3], [0.22, 0.42], [0.1, 0.52], [0, 0.36]],
+    [[0, 0.12], [-0.15, 0.06], [-0.04, 0.18]],
+    [[0, 0.6], [-0.08, 0.7], [0, 0.78], [0.08, 0.7], [0, 0.6]],
+    ell(0, 0.71, 0.028, 0.028, 6),
+  ],
+  vigor: () => [
+    [[-0.07, 0.6], [-0.07, 0.42], [-0.16, 0.32], [-0.2, 0.18], [-0.12, 0.05], [0.12, 0.05], [0.2, 0.18], [0.16, 0.32], [0.07, 0.42], [0.07, 0.6], [-0.07, 0.6]],
+    box(-0.055, 0.6, 0.055, 0.68),
+    [[-0.055, 0.68], [0.055, 0.68]],
+    [[-0.1, 0.13], [0, 0.27], [0.1, 0.13]],
+    [[-0.09, 0.22], [0, 0.35], [0.09, 0.22]],
+  ],
+  map: () => [
+    box(-0.32, 0.06, 0.32, 0.46),
+    [[-0.107, 0.06], [-0.107, 0.46]], [[0.107, 0.06], [0.107, 0.46]],   // fold creases
+    [[-0.22, 0.14], [-0.05, 0.3], [0.08, 0.2], [0.22, 0.36]],           // route
+    [[0.14, 0.3], [0.24, 0.42]], [[0.24, 0.3], [0.14, 0.42]],           // X mark
+    ell(-0.22, 0.15, 0.022, 0.022, 6),                                  // start dot
+  ],
+  relic: () => [
+    [[-0.22, 0.42], [0.22, 0.42], [0.12, 0.62], [-0.12, 0.62], [-0.22, 0.42]],   // crown facet
+    [[-0.22, 0.42], [0, 0.08], [0.22, 0.42]],                                    // pavilion
+    [[-0.12, 0.62], [0, 0.08]], [[0.12, 0.62], [0, 0.08]],                       // facet lines
+    [[-0.11, 0.52], [0.11, 0.52]],                                               // girdle
+  ],
+  axe: () => [
+    [[-0.025, 0], [-0.025, 0.78], [0.025, 0.78], [0.025, 0], [-0.025, 0]],
+    [[0, 0.04], [0, 0.74]],
+    [[0, 0.58], [0.28, 0.54], [0.37, 0.78], [0.33, 0.93], [0.02, 0.82]],
+    [[0.08, 0.62], [0.3, 0.6]],
+    [[0, 0.74], [-0.1, 0.77], [-0.13, 0.68], [0, 0.65]],
+  ],
+  crown: t => {
+    const g = 0.04 * Math.sin(t / 200);
+    return [
+      [[-0.36, 0.06], [-0.36, 0.34], [-0.2, 0.2], [-0.08, 0.42], [0, 0.24], [0.08, 0.42], [0.2, 0.2], [0.36, 0.34], [0.36, 0.06], [-0.36, 0.06]],
+      [[-0.36, 0.14], [0.36, 0.14]],
+      ell(-0.2, 0.1, 0.025, 0.025, 6), ell(0, 0.1, 0.03, 0.03, 6), ell(0.2, 0.1, 0.025, 0.025, 6),
+      ell(0, 0.5 + g, 0.05, 0.05, 10), ell(0, 0.5 + g, 0.09, 0.09, 12),
+    ];
+  },
+};
+const SHAPE = {
+  mould(t) {
+    const P = [], top = [];
+    for (let i = 0; i <= 28; i++) {
+      const a = Math.PI * (1 - i / 28), w = 1 + 0.07 * Math.sin(t / 250 + i * 1.7);
+      top.push([Math.cos(a) * 0.95 * w, Math.sin(a) * 0.55 * w + 0.02]);
+    }
+    const bottom = [];
+    for (let i = 1; i < 10; i++) bottom.push([0.95 - i * 0.19, 0.03 * Math.sin(t / 180 + i)]);
+    const sway = 0.05 * Math.sin(t / 400);
+    P.push([[-0.25, 0.5], [-0.3 + sway, 0.85]], ell(-0.3 + sway, 0.9, 0.07, 0.06, 8), ell(-0.3 + sway, 0.9, 0.03, 0.025, 6));
+    P.push([[0.15, 0.52], [0.22 + sway, 0.98]], ell(0.22 + sway, 1.03, 0.06, 0.05, 8), ell(0.22 + sway, 1.03, 0.025, 0.02, 6));
+    P.push([...top, ...bottom, top[0]]);
+    P.push(ell(0, 0.28, 0.62, 0.3, 20, 0.12, Math.PI - 0.12));
+    P.push(ell(-0.4, 0.22, 0.09, 0.06, 8), ell(0.18, 0.33, 0.11, 0.07, 8), ell(0.5, 0.14, 0.06, 0.05, 8), ell(-0.05, 0.12, 0.05, 0.04, 8), ell(0.4, 0.42, 0.05, 0.04, 8));
+    P.push([[-0.6, 0.08], [-0.62, -0.03]], [[0.32, 0.05], [0.34, -0.05]]);
+    return P;
+  },
+  crawler(t) {
+    const P = [], w = 0.06 * Math.sin(t / 120);
+    for (let i = 0; i < 4; i++) {
+      const ph = (i % 2 ? w : -w);
+      const leg = [[0.3, 0.42 + i * 0.05], [0.6 + i * 0.14, 0.78 + i * 0.05 + ph], [0.95 + i * 0.22, 0]];
+      P.push(leg, mir(leg));
+    }
+    P.push(ell(0, 0.45, 0.52, 0.34));
+    P.push(ell(0, 0.45, 0.3, 0.26, 16), [[-0.5, 0.45], [0.5, 0.45]]);
+    P.push(ell(0, 0.88, 0.28, 0.2));
+    for (const [x, y] of [[-0.12, 0.94], [-0.04, 0.97], [0.04, 0.97], [0.12, 0.94], [-0.07, 0.88], [0.07, 0.88]]) P.push(ell(x, y, 0.022, 0.022, 6));
+    P.push([[-0.08, 0.72], [-0.15, 0.58], [-0.1, 0.62]], [[0.08, 0.72], [0.15, 0.58], [0.1, 0.62]]);
+    P.push([[-0.2, 0.8], [-0.34, 0.72]], [[0.2, 0.8], [0.34, 0.72]]);
+    return P;
+  },
+  hound(t) {
+    const j = 0.03 * Math.sin(t / 150), P = [];
+    const legF = [[0.38, 0.56], [0.48, 0.28], [0.42, 0.1], [0.4, 0]];
+    const legB = [[0.6, 0.6], [0.72, 0.3], [0.68, 0.12], [0.66, 0.04]];
+    P.push(legB, mir(legB), legF, mir(legF));
+    P.push(ell(0, 0.62, 0.7, 0.3));
+    P.push([[-0.58, 0.84], [0.56, 0.86]]);
+    for (let i = -2; i <= 2; i++) P.push([[i * 0.18, 0.4], [i * 0.2, 0.84]]);
+    const head = [[-0.36, 1.25], [0.36, 1.25], [0.28, 0.86], [0, 0.7 + j], [-0.28, 0.86], [-0.36, 1.25]];
+    const ear = [[-0.32, 1.25], [-0.48, 1.5], [-0.14, 1.25]];
+    P.push(head, ear, mir(ear));
+    P.push([[-0.2, 0.86], [-0.28, 1.2]], [[0.2, 0.86], [0.28, 1.2]]);
+    P.push(ell(-0.16, 1.06, 0.06, 0.06, 8), ell(0.16, 1.06, 0.06, 0.06, 8));
+    P.push([[0, 1.0], [0, 0.74]], ell(0, 0.76, 0.03, 0.025, 6));
+    P.push([[-0.2, 0.86], [-0.14, 0.8], [-0.08, 0.86], [-0.02, 0.8], [0.04, 0.86], [0.1, 0.8], [0.16, 0.86], [0.2, 0.84]]);
+    return P;
+  },
+  toad(t) {
+    const b = 0.03 * Math.sin(t / 300), P = [];
+    const leg = [[0.55, 0.32], [1.0, 0.46], [1.12, 0.02], [0.98, 0], [0.9, 0.12], [0.82, 0], [0.72, 0.09], [0.62, 0], [0.55, 0.1]];
+    P.push(leg, mir(leg));
+    P.push(ell(0, 0.5 + b, 0.95, 0.5 + b));
+    P.push(ell(0, 0.34, 0.6, 0.22, 16, 0.18, Math.PI - 0.18));
+    for (const [x, y] of [[-0.5, 0.6], [-0.2, 0.74], [0.3, 0.66], [0.55, 0.5], [-0.62, 0.4], [0.12, 0.52]]) P.push(ell(x, y, 0.05, 0.04, 6));
+    P.push(ell(-0.45, 0.98 + b, 0.18, 0.16, 12), ell(0.45, 0.98 + b, 0.18, 0.16, 12));
+    P.push(ell(-0.45, 0.98 + b, 0.1, 0.1, 8), ell(0.45, 0.98 + b, 0.1, 0.1, 8));
+    P.push(ell(-0.45, 1.0 + b, 0.045, 0.07, 6), ell(0.45, 1.0 + b, 0.045, 0.07, 6));
+    P.push(ell(0, 0.62, 0.6, 0.2, 16, 0.14, Math.PI - 0.14).map(([x, y]) => [x, 1.24 - y]));
+    P.push([[-0.1, 0.78], [-0.08, 0.73]], [[0.1, 0.78], [0.08, 0.73]]);
+    return P;
+  },
+  wraith(t) {
+    const f = 0.12 + 0.1 * Math.sin(t / 400), P = [], hem = [];
+    for (let i = 0; i <= 12; i++) hem.push([0.75 - i * 0.125, f + 0.1 * Math.sin(t / 150 + i * 1.3)]);
+    const arm = [[0.38, 1.15 + f], [0.78, 1.0 + f], [0.95, 0.9 + f], [1.05 + 0.05 * Math.sin(t / 200), 1.02 + f]];
+    P.push(arm, mir(arm));
+    P.push([[0.95, 0.9 + f], [1.0, 0.7 + f], [0.9, 0.86 + f]], mir([[0.95, 0.9 + f], [1.0, 0.7 + f], [0.9, 0.86 + f]]));
+    P.push([[-0.42, 1.3 + f], [0, 1.85 + f], [0.42, 1.3 + f], [0.75, hem[0][1]], ...hem, [-0.42, 1.3 + f]]);
+    P.push([[-0.1, 1.5 + f], [-0.12, f + 0.12]], [[0.12, 1.5 + f], [0.14, f + 0.12]], [[0, 1.6 + f], [0, f + 0.06]]);
+    P.push([[-0.32, 1.5 + f], [-0.28, 1.76 + f], [0, 1.86 + f], [0.28, 1.76 + f], [0.32, 1.5 + f]]);
+    P.push(ell(0, 1.42 + f, 0.2, 0.24, 14));
+    P.push(ell(-0.08, 1.46 + f, 0.035, 0.045, 8), ell(0.08, 1.46 + f, 0.035, 0.045, 8));
+    for (const c of [[1.05, 1.02], [-1.05, 1.02]]) P.push([[c[0], c[1] + f], [c[0] * 1.08, c[1] + f + 0.1]], [[c[0], c[1] + f], [c[0] * 1.12, c[1] + f - 0.02]], [[c[0], c[1] + f], [c[0] * 1.05, c[1] + f - 0.12]]);
+    return P;
+  },
+  golem(t) {
+    const s = 0.02 * Math.sin(t / 500), P = [];
+    const leg = box(0.12, 0, 0.42, 0.82), arm = box(0.62, 0.7 + s, 0.88, 1.42 + s);
+    P.push(leg, mir(leg), arm, mir(arm));
+    P.push([[0.12, 0.3], [0.42, 0.3]], mir([[0.12, 0.3], [0.42, 0.3]]));
+    P.push(box(0.08, 0, 0.46, 0.12), mir(box(0.08, 0, 0.46, 0.12)));
+    P.push(box(0.58, 0.68 + s, 0.92, 0.82 + s), mir(box(0.58, 0.68 + s, 0.92, 0.82 + s)));
+    P.push(box(0.6, 0.52 + s, 0.9, 0.7 + s), mir(box(0.6, 0.52 + s, 0.9, 0.7 + s)));
+    P.push([[-0.62, 1.48], [0.62, 1.48], [0.46, 0.8], [-0.46, 0.8], [-0.62, 1.48]]);
+    P.push([[-0.52, 1.0], [0.52, 1.0]], [[0, 1.48], [0, 0.8]]);
+    P.push(box(-0.22, 1.04, 0.22, 1.32));
+    P.push(box(0.42, 1.3, 0.66, 1.5), mir(box(0.42, 1.3, 0.66, 1.5)));
+    P.push(box(-0.24, 1.5, 0.24, 1.9));
+    P.push([[-0.24, 1.6], [0.24, 1.6]]);
+    P.push(box(-0.16, 1.68, -0.04, 1.77), box(0.04, 1.68, 0.16, 1.77));
+    P.push([[-0.14, 1.55], [0.14, 1.55]]);
+    for (const x of [-0.1, 0, 0.1]) P.push([[x, 1.52], [x, 1.58]]);
+    for (const [x, y] of [[-0.4, 1.35], [0.4, 1.35], [-0.3, 0.92], [0.3, 0.92], [-0.52, 1.12], [0.52, 1.12]]) P.push(ell(x, y, 0.03, 0.03, 6));
+    return P;
+  },
+  king(t) {
+    const s = 0.04 * Math.sin(t / 350), P = [];
+    P.push([[0.85, 0], [0.85, 1.75]]);
+    P.push(ell(0.85, 1.85 + s, 0.11, 0.11, 12), ell(0.85, 1.85 + s, 0.05, 0.05, 8));
+    P.push([[0.74, 1.82 + s], [0.96, 1.82 + s]]);
+    P.push([[-0.35, 1.5], [0.35, 1.5], [0.7, 0], [-0.7, 0], [-0.35, 1.5]]);
+    P.push([[0, 1.5], [0, 0]], [[-0.3, 0.7], [-0.34, 0]], [[0.3, 0.7], [0.34, 0]]);
+    P.push([[-0.2, 0.9], [0.2, 0.9]]);
+    P.push([[0.32, 1.35], [0.62, 1.05], [0.85, 1.15]], mir([[0.32, 1.35], [0.62, 1.05], [0.4, 0.9]]));
+    P.push([[-0.35, 1.5], [-0.2, 1.62], [0.2, 1.62], [0.35, 1.5]]);
+    P.push(ell(0, 1.66, 0.18, 0.2, 14));
+    P.push(ell(-0.07, 1.68, 0.045, 0.05, 8), ell(0.07, 1.68, 0.045, 0.05, 8));
+    P.push([[0, 1.64], [-0.03, 1.56], [0.03, 1.56], [0, 1.64]]);
+    P.push([[-0.08, 1.52], [0.08, 1.52]]);
+    for (let i = -2; i <= 2; i++) P.push([[i * 0.035, 1.52], [i * 0.035, 1.56]]);
+    P.push([[-0.2, 1.8], [-0.22, 2.0], [-0.1, 1.9], [0, 2.04], [0.1, 1.9], [0.22, 2.0], [0.2, 1.8], [-0.2, 1.8]]);
+    P.push(ell(0, 2.04, 0.025, 0.025, 6), ell(-0.22, 2.0, 0.02, 0.02, 6), ell(0.22, 2.0, 0.02, 0.02, 6));
+    return P;
+  },
+};
+
+// ---------- rendering ----------
+function line(x0, y0, x1, y1) { ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); ctx.stroke(); }
+function bright(d, range) {
+  if (!G.light) return d === 0 ? 0.5 : 0.22;
+  return Math.max(0.15, 1 - d / (range + 1.5)) * (0.92 + 0.08 * Math.random());
+}
+// Draws the corridor as seen from position P. `shift` (between -1 and 0) pulls every depth closer,
+// which is how the forward/back glide animation is drawn. Anything that ends up behind the eye is clipped.
+function renderMain(now, P = G.p, shift = 0) {
+  const p = P, fd = p.dir, ld = (fd + 3) % 4, rd = (fd + 1) % 4, fx = DX[fd], fy = DY[fd];
+  const baseRange = lightRange();
+  const range = baseRange + (shift < 0 ? 1 : 0);   // see one cell further while gliding forward
+  const Z = z => Math.max(0, z + shift);           // depth after shift, clipped at the eye
+  const cells = [];
+  let d = 0;
+  for (; d <= range; d++) { const x = p.x + fx * d, y = p.y + fy * d; if (isWall(x, y)) break; cells.push({ d, x, y }); }
+  const hitWall = d <= range;
+  ctx.lineWidth = 2;
+  for (const c of cells) {
+    if (c.d + 1 + shift <= 0.001) continue;        // cell entirely behind us
+    const n = R(Z(c.d)), f = R(Z(c.d + 1)), nearVisible = c.d + shift > 0;
+    ctx.strokeStyle = col(bright(Z(c.d), baseRange), RGB.wall);
+    for (const [sd, s] of [[ld, -1], [rd, 1]]) {
+      const sx = c.x + DX[sd], sy = c.y + DY[sd];
+      const nx = s < 0 ? n.l : n.r, fxp = s < 0 ? f.l : f.r;
+      if (isWall(sx, sy)) {
+        line(nx, n.t, fxp, f.t); line(nx, n.b, fxp, f.b); line(fxp, f.t, fxp, f.b);
+        if (nearVisible) line(nx, n.t, nx, n.b);
+      } else {
+        if (nearVisible) line(nx, n.t, nx, n.b);
+        line(fxp, f.t, fxp, f.b);
+        if (isWall(sx + fx, sy + fy)) {
+          const outer = CX + s * 3 * HW * f.k;
+          const xo = s < 0 ? Math.max(nx, outer) : Math.min(nx, outer);
+          line(xo, f.t, fxp, f.t); line(xo, f.b, fxp, f.b);
+        }
+      }
+    }
+  }
+  if (hitWall) {
+    const f = R(Z(cells.length)); ctx.strokeStyle = col(bright(Z(cells.length), baseRange), RGB.wall);
+    ctx.strokeRect(f.l, f.t, f.r - f.l, f.b - f.t);
+  }
+  // contents, far to near
+  for (let i = cells.length - 1; i >= 0; i--) {
+    const c = cells[i], a = bright(Z(c.d), baseRange);
+    if (G.L.stairs && G.L.stairs.x === c.x && G.L.stairs.y === c.y && c.d + 0.8 + shift > 0.05) {
+      const z0 = Z(c.d + 0.2), z1 = Z(c.d + 0.8), n = R(z0), f = R(z1), w = 0.35;
+      ctx.strokeStyle = col(a, RGB.ladder);
+      const xl = k => CX - HW * k * w, xr = k => CX + HW * k * w;
+      ctx.beginPath(); ctx.moveTo(xl(n.k), n.b); ctx.lineTo(xr(n.k), n.b); ctx.lineTo(xr(f.k), f.b); ctx.lineTo(xl(f.k), f.b); ctx.closePath(); ctx.stroke();
+      for (let r = 1; r < 4; r++) { const k = fz(z0 + (z1 - z0) * r / 4), y = CY + HH * k; line(CX - HW * k * w * 0.7, y, CX + HW * k * w * 0.7, y); }
+      line(CX - HW * n.k * w * 0.7, n.b, CX - HW * f.k * w * 0.7, f.b); line(CX + HW * n.k * w * 0.7, n.b, CX + HW * f.k * w * 0.7, f.b);
+    }
+    if (G.L.up && G.L.up.x === c.x && G.L.up.y === c.y && c.d + 0.8 + shift > 0.05) {
+      const z0 = Z(c.d + 0.2), z1 = Z(c.d + 0.8), n = R(z0), f = R(z1), w = 0.35;
+      ctx.strokeStyle = col(a, RGB.ladder);
+      const xl = k => CX - HW * k * w, xr = k => CX + HW * k * w;
+      ctx.beginPath(); ctx.moveTo(xl(n.k), n.t); ctx.lineTo(xr(n.k), n.t); ctx.lineTo(xr(f.k), f.t); ctx.lineTo(xl(f.k), f.t); ctx.closePath(); ctx.stroke();
+      for (let r = 1; r < 4; r++) { const k = fz(z0 + (z1 - z0) * r / 4), y = CY - HH * k; line(CX - HW * k * w * 0.7, y, CX + HW * k * w * 0.7, y); }
+      line(CX - HW * n.k * w * 0.7, n.t, CX - HW * f.k * w * 0.7, f.t); line(CX + HW * n.k * w * 0.7, n.t, CX + HW * f.k * w * 0.7, f.t);
+    }
+    const its = itemsAt(c.x, c.y), iz = c.d + 0.45 + shift;
+    if (iz > 0.15) its.forEach((o, j) => {
+      const k = fz(iz), s = HH * k * 0.55;
+      const off = (j - (its.length - 1) / 2) * 0.55;
+      drawPolys(ICON[o.it.kind](now), CX + off * HH * k, CY + HH * k, s, a, true, RGB.item);
+    });
+    const m = monAt(c.x, c.y);
+    if (m && (G.light || c.d <= 1)) {
+      const z = Math.max(0.3, c.d - 0.15 + shift), k = fz(z), s = HH * k * 1.2;
+      const jx = now < m.hurt ? (Math.random() - 0.5) * 12 : 0;
+      ctx.lineWidth = now < m.hurt ? 3 : 2;
+      drawPolys(SHAPE[m.k](now + m.ph * 1000), CX + jx, CY + HH * k, s, G.light ? a : 0.35, true, RGB.mon);
+      if (m.carry && G.light) drawPolys(ICON[m.carry.kind](now), CX + jx + s * 0.95, CY + HH * k - s * 0.45, s * 0.5, a, true, RGB.item);
+      ctx.lineWidth = 2;
+    }
+    // a monster standing in a side tunnel beside this cell peeks through the doorway
+    if (c.d + 1 + shift > 0.05 && (G.light || c.d <= 1)) {
+      const nn = R(Z(c.d)), ff = R(Z(c.d + 1));
+      for (const [sd, sgn] of [[ld, -1], [rd, 1]]) {
+        const sx = c.x + DX[sd], sy = c.y + DY[sd];
+        if (isWall(sx, sy)) continue;
+        const sm = monAt(sx, sy);
+        if (!sm) continue;
+        const nx = sgn < 0 ? nn.l : nn.r, fxp = sgn < 0 ? ff.l : ff.r;
+        ctx.save();
+        ctx.beginPath(); ctx.moveTo(nx, nn.t); ctx.lineTo(fxp, ff.t); ctx.lineTo(fxp, ff.b); ctx.lineTo(nx, nn.b); ctx.closePath(); ctx.clip();
+        const z = Math.max(0.35, c.d + 0.5 + shift), k = fz(z), ms = HH * k * 1.2;
+        const jx = now < sm.hurt ? (Math.random() - 0.5) * 10 : 0;
+        ctx.lineWidth = now < sm.hurt ? 3 : 2;
+        // shift so the side of the monster nearest the corridor shows in the doorway (its right side
+        // for a left tunnel, its left side for a right tunnel), rather than its centre
+        drawPolys(SHAPE[sm.k](now + sm.ph * 1000), (nx + fxp) / 2 + sgn * ms * 0.58 + jx, CY + HH * k, ms, G.light ? a * 0.9 : 0.3, true, RGB.mon);
+        ctx.lineWidth = 2;
+        ctx.restore();
+      }
+    }
+  }
+}
+// ---------- attack animation ----------
+// Weapons (and other held items) sweep in an arc from the attacking hand's side; a shield or an empty
+// hand thrusts forward instead.
+const SWING_MS = 300;
+const FIST = [[[-0.28, 0], [-0.3, 0.3], [-0.22, 0.42], [0.22, 0.42], [0.3, 0.3], [0.28, 0], [-0.28, 0]],
+              [[-0.12, 0.28], [-0.12, 0.42]], [[0.02, 0.28], [0.02, 0.42]], [[0.15, 0.28], [0.15, 0.42]],
+              [[-0.3, 0.2], [-0.05, 0.16], [0.08, 0.22]]];
+function drawSwing(now) {
+  const { t: t0, h, it } = G.swing, sgn = h ? 1 : -1;           // sgn: +1 right hand, -1 left hand
+  const t = (now - t0) / SWING_MS;
+  const fade = t < 0.75 ? 1 : (1 - t) / 0.25;
+  ctx.lineWidth = 3;
+  if (it && it.type !== 'shield') {
+    // arc: pivot below the screen edge on the hand's side, blade sweeping across toward the centre
+    const polys = ICON[it.kind](now), px = CX + sgn * 300, py = VH + 30, s = 380;
+    const angleAt = u => { const e = 1 - Math.pow(1 - Math.min(1, Math.max(0, u)), 3); return sgn * (0.35 - 1.5 * e); };
+    for (let k = 4; k >= 0; k--) {                                   // motion trail, oldest first
+      const u = t - k * 0.06; if (u < 0) continue;
+      ctx.save(); ctx.translate(px, py); ctx.rotate(angleAt(u));
+      drawPolys(polys, 0, 0.1 * s, s, (k ? 0.22 / k : 1) * fade, k === 0, RGB.item);
+      ctx.restore();
+    }
+  } else {
+    // thrust: rises from the bottom corner toward the centre and shrinks as it goes "into" the view
+    const e = Math.sin(Math.min(1, t) * Math.PI);                    // out and back
+    const x = CX + sgn * (300 - 190 * e), y = VH + 40 - 170 * e, s = (it ? 360 : 300) * (1 - 0.35 * e);
+    drawPolys(it ? ICON[it.kind](now) : FIST, x, y, s, fade, true, it ? RGB.item : FG);
+  }
+  ctx.lineWidth = 2;
+}
+// Things drawn once on top of the corridor view (not repeated during a turn pan).
+function renderOverlay(now) {
+  if (G.swing && now - G.swing.t < SWING_MS) drawSwing(now);
+  if (!G.light) {
+    ctx.fillStyle = col(0.35); ctx.font = '14px "Courier New",monospace'; ctx.textAlign = 'center';
+    ctx.fillText('IT IS DARK. YOU CAN BARELY SEE.', CX, 24);
+  }
+}
+// ---------- movement animation (toggle with the ANIMATE command) ----------
+let animOn = true;
+try { animOn = localStorage.getItem('vael-animate') !== 'off'; } catch (e) { /* storage unavailable */ }
+const MOVE_MS = 140, TURN_MS = 170;
+function renderView(now) {
+  const a = G.anim;
+  const t = a && animOn ? (now - a.t0) / a.dur : 1;
+  if (t >= 1) { renderMain(now); renderOverlay(now); return; }
+  const u = t * t * (3 - 2 * t);                    // ease in/out
+  if (a.type === 'move') {
+    if (a.back) renderMain(now, G.p, -(1 - u));     // from the new spot, scenery recedes
+    else renderMain(now, a.from, -u);               // from the old spot, scenery approaches
+  } else {
+    // each quarter turn is its own eased pan; a turn-around plays two of them back to back
+    const s = a.sign, steps = a.steps || 1;         // sign: +1 turning right, -1 turning left
+    const k = Math.min(steps - 1, Math.floor(t * steps)), lt = t * steps - k, v = lt * lt * (3 - 2 * lt);
+    const d0 = (a.fromDir + s * k + 4) % 4, d1 = (d0 + s + 4) % 4;
+    ctx.save(); ctx.translate(-s * v * W, 0); renderMain(now, { x: G.p.x, y: G.p.y, dir: d0 }); ctx.restore();
+    ctx.save(); ctx.translate(s * (1 - v) * W, 0); renderMain(now, { x: G.p.x, y: G.p.y, dir: d1 }); ctx.restore();
+    const seam = s > 0 ? (1 - v) * W : v * W;
+    ctx.strokeStyle = col(0.5, RGB.wall); line(seam, 0, seam, VH);
+  }
+  renderOverlay(now);
+}
+// Overhead map colours
+const MAPCOL = { item: col(1, RGB.item), mon: col(1, RGB.mon), ladder: col(1, RGB.ladder) };
+const MAPCH = { mould: 'S', crawler: 'C', hound: 'H', toad: 'T', wraith: 'W', golem: 'G', king: 'K' };
+// mode: 'explored' (cells you have seen, via the MAP item), 'full' (everything, SHIFT+F3 test view)
+function renderMap(mode, now) {
+  const L = G.L, S = L.S, seen = L.seen;
+  const cs = Math.floor(Math.min((W - 40) / S, (VH - 70) / S));
+  const ox = Math.floor((W - cs * S) / 2), oy = 34 + Math.floor((VH - 64 - cs * S) / 2);
+  const shown = i => mode !== 'explored' || seen[i];
+  // faint fill on explored floor
+  ctx.fillStyle = col(0.08);
+  for (let i = 0; i < S * S; i++) if (!L.g[i] && seen[i]) ctx.fillRect(ox + (i % S) * cs, oy + ((i / S) | 0) * cs, cs, cs);
+  // wall edges: explored bright, unexplored dim (not drawn at all in explored mode)
+  const edges = (want, a) => {
+    ctx.strokeStyle = col(a); ctx.lineWidth = 1.5; ctx.beginPath();
+    for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) {
+      const i = y * S + x;
+      if (L.g[i] || !want(i)) continue;
+      const X = ox + x * cs, Y = oy + y * cs;
+      if (isWall(x, y - 1)) { ctx.moveTo(X, Y); ctx.lineTo(X + cs, Y); }
+      if (isWall(x, y + 1)) { ctx.moveTo(X, Y + cs); ctx.lineTo(X + cs, Y + cs); }
+      if (isWall(x - 1, y)) { ctx.moveTo(X, Y); ctx.lineTo(X, Y + cs); }
+      if (isWall(x + 1, y)) { ctx.moveTo(X + cs, Y); ctx.lineTo(X + cs, Y + cs); }
+    }
+    ctx.stroke();
+  };
+  edges(i => seen[i], 0.9);
+  if (mode !== 'explored') edges(i => !seen[i], mode === 'full' ? 0.35 : 0.6);
+  const s = L.stairs;
+  if (s && shown(s.y * S + s.x)) {
+    const X = ox + s.x * cs + cs / 2, Y = oy + s.y * cs + cs / 2;
+    ctx.strokeStyle = MAPCOL.ladder; ctx.lineWidth = 2; ctx.beginPath();
+    ctx.moveTo(X - cs * 0.3, Y - cs * 0.2); ctx.lineTo(X, Y + cs * 0.3); ctx.lineTo(X + cs * 0.3, Y - cs * 0.2); ctx.stroke();
+  }
+  const up = L.up;
+  if (up && shown(up.y * S + up.x)) {
+    const X = ox + up.x * cs + cs / 2, Y = oy + up.y * cs + cs / 2;
+    ctx.strokeStyle = MAPCOL.ladder; ctx.lineWidth = 2; ctx.beginPath();
+    ctx.moveTo(X - cs * 0.3, Y + cs * 0.2); ctx.lineTo(X, Y - cs * 0.3); ctx.lineTo(X + cs * 0.3, Y + cs * 0.2); ctx.stroke();
+  }
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  if (mode === 'full') {
+    ctx.strokeStyle = MAPCOL.item; ctx.lineWidth = 1.5;
+    for (const o of L.items) {
+      const X = ox + o.x * cs + cs / 2, Y = oy + o.y * cs + cs / 2, r = cs * 0.28;
+      ctx.beginPath(); ctx.moveTo(X, Y - r); ctx.lineTo(X + r, Y); ctx.lineTo(X, Y + r); ctx.lineTo(X - r, Y); ctx.closePath(); ctx.stroke();
+    }
+    ctx.font = 'bold ' + Math.max(9, cs - 1) + 'px "Courier New",monospace';
+    for (const m of L.mons) {
+      ctx.fillStyle = MAPCOL.mon; ctx.globalAlpha = now < m.hurt ? 0.4 : 1;
+      ctx.fillText(MAPCH[m.k], ox + m.x * cs + cs / 2, oy + m.y * cs + cs / 2 + 1);
+      if (m.carry) { ctx.fillStyle = MAPCOL.item; ctx.fillRect(ox + m.x * cs + cs * 0.78, oy + m.y * cs + cs * 0.08, cs * 0.18, cs * 0.18); }
+    }
+    ctx.globalAlpha = 1;
+  }
+  // player arrow
+  const X = ox + G.p.x * cs + cs / 2, Y = oy + G.p.y * cs + cs / 2, d = G.p.dir, r = cs * 0.38;
+  ctx.fillStyle = col(1); ctx.beginPath();
+  ctx.moveTo(X + DX[d] * r, Y + DY[d] * r);
+  ctx.lineTo(X - DX[d] * r + DY[d] * r * 0.7, Y - DY[d] * r - DX[d] * r * 0.7);
+  ctx.lineTo(X - DX[d] * r - DY[d] * r * 0.7, Y - DY[d] * r + DX[d] * r * 0.7);
+  ctx.closePath(); ctx.fill();
+  // header / legend
+  ctx.textBaseline = 'alphabetic'; ctx.textAlign = 'left'; ctx.fillStyle = col(1);
+  ctx.font = 'bold 16px "Courier New",monospace';
+  const title = { explored: 'YOUR MAP', full: 'FULL MAZE (TEST VIEW)' }[mode] || 'MAP';
+  ctx.fillText(title + ' - DEPTH ' + G.lvl, 14, 22);
+  ctx.textAlign = 'right'; ctx.fillStyle = col(0.55); ctx.font = '13px "Courier New",monospace';
+  ctx.fillText(mode === 'full' ? 'SHIFT+F3 OR ESC TO CLOSE' : 'LOOK OR ESC TO CLOSE', W - 14, 22);
+  if (mode === 'full') {
+    // colour-coded legend, laid out piece by piece and centred
+    const parts = [['S MOULD C CRAWLER T TOAD H HOUND W WRAITH G GOLEM K KING  ', MAPCOL.mon], ['◇ ITEM ▪ CARRIED  ', MAPCOL.item],
+                   ['V DOWN ^ UP  ', MAPCOL.ladder], [L.mons.length + ' FOES ' + L.items.length + ' ITEMS', col(0.55)]];
+    ctx.textAlign = 'left'; ctx.font = '12px "Courier New",monospace';
+    let x = CX - parts.reduce((w, [t]) => w + ctx.measureText(t).width, 0) / 2;
+    for (const [t, c] of parts) { ctx.fillStyle = c; ctx.fillText(t, x, VH - 10); x += ctx.measureText(t).width; }
+  }
+}
+function renderPack() {
+  ctx.fillStyle = col(1); ctx.textAlign = 'left'; ctx.font = 'bold 20px "Courier New",monospace';
+  ctx.fillText('YOUR PACK  (' + G.pack.length + '/' + PACK_MAX + ')', 60, 50);
+  ctx.font = '18px "Courier New",monospace';
+  if (!G.pack.length) ctx.fillText('- EMPTY -', 80, 85);
+  G.pack.forEach((it, i) => ctx.fillText((i + 1) + '. ' + it.name, 80, 85 + i * 26));
+  const here = itemsAt(G.p.x, G.p.y);
+  ctx.font = 'bold 20px "Courier New",monospace';
+  ctx.fillText('ON THE FLOOR', 470, 50);
+  ctx.font = '18px "Courier New",monospace';
+  if (!here.length) ctx.fillText('- NOTHING -', 490, 85);
+  here.forEach((o, i) => ctx.fillText(o.it.name, 490, 85 + i * 26));
+  ctx.fillStyle = col(0.6);
+  ctx.fillText('LIGHT: ' + (G.light ? G.light.name + ' (' + Math.ceil(G.light.rem) + 's)' : 'NONE'), 60, 340);
+  ctx.fillText('FACING ' + DIRN[G.p.dir] + '   DEPTH ' + G.lvl + '   FOES SLAIN ' + G.kills, 60, 370);
+  ctx.fillText('RANK ' + xpRank() + ' (XP ' + G.xp + ')   DMG +' + strikeBonus() + '   DODGE ' + Math.round(evasion() * 100) + '%   SEED ' + G.seed, 60, 398);
+  ctx.fillText('TYPE LOOK TO RETURN', 60, 410);
+}
+function heart(x, y, s, a) {
+  const P = [];
+  for (let i = 0; i <= 32; i++) {
+    const t = i / 32 * Math.PI * 2;
+    P.push([16 * Math.pow(Math.sin(t), 3) / 17, (13 * Math.cos(t) - 5 * Math.cos(2 * t) - 2 * Math.cos(3 * t) - Math.cos(4 * t)) / 17]);
+  }
+  ctx.lineWidth = 2; drawPolys([P], x, y, s, a, false, RGB.mon);
+}
+function renderStatus(now) {
+  ctx.strokeStyle = col(0.4); ctx.lineWidth = 1; line(0, VH + 0.5, W, VH + 0.5);
+  ctx.font = 'bold 18px "Courier New",monospace'; ctx.fillStyle = col(1);
+  const hn = it => it ? it.name : 'EMPTY';
+  const hc = it => it ? col(1, RGB.item) : col(1);   // held item in yellow, empty hand in green
+  ctx.textAlign = 'left'; ctx.fillStyle = hc(G.hands[0]); ctx.fillText('L: ' + hn(G.hands[0]), 14, VH + 36);
+  ctx.textAlign = 'right'; ctx.fillStyle = hc(G.hands[1]); ctx.fillText('R: ' + hn(G.hands[1]), W - 14, VH + 36);
+  ctx.fillStyle = col(1);
+  const pulse = G.state === 'play' ? 1 + 0.35 * Math.exp(-(now - G.beatT) / 110) : 1;
+  heart(CX - 46, VH + 30, 15 * pulse, G.state === 'dead' ? 0.3 : 1);
+  ctx.textAlign = 'left'; ctx.font = '16px "Courier New",monospace'; ctx.fillStyle = col(1);
+  ctx.fillText(Math.max(0, G.hp) + '/' + G.maxhp, CX - 22, VH + 28);
+  ctx.fillStyle = col(0.55); ctx.font = '13px "Courier New",monospace';
+  ctx.fillText('DEPTH ' + G.lvl + (G.fatigue >= 8 ? '  EXHAUSTED' : G.fatigue >= 4 ? '  WINDED' : ''), CX - 22, VH + 46);
+  ctx.textAlign = 'right'; ctx.fillText('SEED ' + G.seed, W - 14, VH + 14);
+  ctx.textAlign = 'left'; ctx.fillStyle = col(0.7, RGB.item);
+  ctx.fillText('RANK ' + xpRank() + '   XP ' + G.xp, 14, VH + 14);
+}
+function renderTitle(now) {
+  ctx.textAlign = 'center'; ctx.fillStyle = col(1, RGB.item);
+  ctx.font = 'bold 54px "Courier New",monospace'; ctx.fillText('CRYPTS OF VAEL', CX, 95);
+  ctx.font = '18px "Courier New",monospace'; ctx.fillStyle = col(0.7);
+  ctx.fillText('A VECTOR DUNGEON CRAWL', CX, 130);
+  ctx.fillStyle = col(0.85);
+  ctx.fillText('TYPE A SEED NUMBER TO REPLAY A MAZE,', CX, 178);
+  ctx.fillText('OR LEAVE IT BLANK FOR A RANDOM ONE.', CX, 202);
+  if (lastSeed !== null) { ctx.fillStyle = col(0.55); ctx.fillText('LAST SEED: ' + lastSeed, CX, 232); }
+  if (hasSave()) { ctx.fillStyle = col(0.7, RGB.item); ctx.fillText('TYPE  LOAD  TO RESUME YOUR SAVED GAME', CX, 262); }
+  drawPolys(SHAPE.wraith(now), CX, 455, 92, 0.9, true, RGB.mon);
+  ctx.fillStyle = col(0.5 + 0.5 * Math.sin(now / 300));
+  ctx.fillText('PRESS ENTER TO BEGIN', CX, 488);
+}
+function render(now) {
+  ctx.setTransform(SCALE, 0, 0, SCALE, 0, 0);
+  ctx.fillStyle = '#000'; ctx.fillRect(0, 0, W, H);
+  if (!G) { renderTitle(now); return; }
+  if (G.fainted && G.state === 'play') return;      // blacked out: blank screen
+  ctx.save(); ctx.beginPath(); ctx.rect(0, 0, W, VH); ctx.clip();
+  if (G.view === 'explored' || G.view === 'full') renderMap(G.view, now);
+  else if (G.view === 'pack') renderPack(); else renderView(now);
+  if (now < G.flash) { ctx.fillStyle = col(0.25); ctx.fillRect(0, 0, W, VH); }
+  if (G.pending && G.state === 'play') {
+    ctx.fillStyle = 'rgba(0,0,0,0.75)'; ctx.fillRect(0, CY - 50, W, 100);
+    ctx.fillStyle = col(1); ctx.textAlign = 'center'; ctx.font = 'bold 26px "Courier New",monospace';
+    ctx.fillText('START OVER IN MAZE ' + G.pending.seed + '?', CX, CY + 2);
+    ctx.font = '16px "Courier New",monospace';
+    ctx.fillText('Y = NEW MAZE      N = STAY WHERE YOU ARE', CX, CY + 32);
+  }
+  if (G.paused && G.state === 'play' && !G.pending) {
+    ctx.fillStyle = 'rgba(0,0,0,0.72)'; ctx.fillRect(0, CY - 48, W, 96);
+    ctx.fillStyle = col(1); ctx.textAlign = 'center'; ctx.font = 'bold 34px "Courier New",monospace';
+    ctx.fillText('PAUSED', CX, CY + 2);
+    ctx.font = '15px "Courier New",monospace'; ctx.fillText('ENTER ANY COMMAND TO RESUME', CX, CY + 30);
+  }
+  if (G.state !== 'play') {
+    ctx.fillStyle = 'rgba(0,0,0,0.6)'; ctx.fillRect(0, CY - 50, W, 100);
+    ctx.fillStyle = col(1); ctx.textAlign = 'center'; ctx.font = 'bold 36px "Courier New",monospace';
+    ctx.fillText(G.state === 'won' ? 'VICTORY' : 'YOU HAVE PERISHED', CX, CY + 6);
+    ctx.font = '16px "Courier New",monospace'; ctx.fillText('TYPE RESTART AND PRESS ENTER', CX, CY + 36);
+  }
+  ctx.restore();
+  renderStatus(now);
+}
+function loop(now) { if (G) update(now); render(now); requestAnimationFrame(loop); }
+resize();
+requestAnimationFrame(loop);
+
+// ---------- input ----------
+const cmd = document.getElementById('cmd');
+cmd.placeholder = 'SEED (BLANK = RANDOM)';
+const urlSeed = new URLSearchParams(location.search).get('seed');
+if (urlSeed) cmd.value = urlSeed;
+document.addEventListener('click', () => cmd.focus());
+cmd.addEventListener('keydown', e => {
+  ac();
+  if (G && G.state === 'play' && !G.fainted) {
+    if (e.key === 'F3' && e.shiftKey) { e.preventDefault(); G.view = G.view === 'full' ? 'main' : 'full'; return; }
+    if (e.key === 'Escape') { e.preventDefault(); G.view = 'main'; return; }
+  }
+  if (!G) {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      const txt = cmd.value.trim().toUpperCase();
+      cmd.value = '';
+      if (txt === 'LOAD') { if (!loadGame()) { G = null; } }   // stay on title if no save
+      else { newGame(parseSeed(txt)); cmd.placeholder = ''; }
+    }
+    return;
+  }
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    let v = cmd.value.trim();
+    if (G.state !== 'play') {
+      // Game over: only a deliberate RESTART leaves this screen, so stray Enter presses are ignored.
+      cmd.value = '';
+      if (v.toUpperCase() === 'RESTART') { stopMusic(); G = null; cmd.placeholder = 'SEED (BLANK = RANDOM)'; }
+      else if (v) msg('THE GAME IS OVER. TYPE RESTART TO RETURN TO THE TITLE.');
+      return;
+    }
+    if (!v) v = G.last; else G.last = v;
+    cmd.value = '';
+    if (v) exec(v);
+    return;
+  }
+});
+</script>
+</body>
+</html>
