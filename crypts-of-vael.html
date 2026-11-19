@@ -660,7 +660,7 @@ function drawLog() {
 }
 
 // ---------- commands ----------
-const HELP_SEP = '  •  ';   // bullet between commands on the HELP screen
+const HELP_SEP = '  •  ';   // bullet between items in a list, e.g. the end-of-game numbers
 const VERBS = ['MOVE', 'REVEAL', 'TURN', 'ATTACK', 'GET', 'DROP', 'STOW', 'PULL', 'USE', 'LOOK', 'EXAMINE', 'DESCEND', 'ASCEND', 'SAVE', 'LOAD', 'PAUSE', 'QUIT', 'SLEEP', 'HELP', 'SOUND', 'MUSIC', 'SEED', 'ANIMATE', 'XXX'];
 // These commands must be typed in full, so a stray letter can't open the test map views, quit or use XXX.
 const FULL_WORD_ONLY = ['REVEAL', 'QUIT', 'XXX'];
@@ -785,7 +785,7 @@ function exec(line) {
       msg('YOU HAVE NO SUCH THING TO USE.'); break;
     }
     case 'LOOK': G.view = 'main'; break;
-    case 'REVEAL': G.view = 'full'; break;
+    case 'REVEAL': G.view = 'full'; G.tested = true; break;
     case 'EXAMINE': G.view = 'pack'; break;
     case 'DESCEND': {
       const s = G.L.stairs;
@@ -816,7 +816,7 @@ function exec(line) {
     case 'PAUSE': pauseGame(false); msg('GAME PAUSED. ENTER ANY COMMAND TO RESUME.'); break;
     case 'SAVE': saveGame(); break;
     case 'LOAD': loadGame(); break;
-    case 'XXX': testKill(); break;
+    case 'XXX': G.tested = true; testKill(); break;
     case 'ANIMATE':
       animOn = !animOn; G.anim = null;
       try { localStorage.setItem('vael-animate', animOn ? 'on' : 'off'); } catch (e) { /* ignore */ }
@@ -851,14 +851,7 @@ function exec(line) {
       saveVolumes();
       break;
     }
-    case 'HELP':
-      // commands are separated by bullets so it's clear where each one ends
-      msg(['MOVE [BACK|LEFT|RIGHT]', 'TURN LEFT|RIGHT|AROUND', 'ATTACK L|R', 'DESCEND', 'ASCEND'].join(HELP_SEP));
-      msg(['GET L|R [ITEM]', 'DROP L|R', 'STOW L|R', 'PULL L|R ITEM', 'USE L|R|ITEM'].join(HELP_SEP));
-      msg('USE MAP SHOWS WHERE YOU HAVE BEEN (YOU START WITH A MAP IN YOUR PACK).');
-      msg(['SLEEP [1-20]', 'SAVE', 'LOAD', 'PAUSE', 'QUIT', 'EXAMINE (PACK)', 'LOOK', 'SEED', 'SOUND [0-9]', 'MUSIC [0-9]', 'ANIMATE'].join(HELP_SEP));
-      msg('WORDS MAY BE ABBREVIATED. EVERY STEP TIRES YOU; HURRYING TIRES YOU MORE. STAND STILL TO RECOVER.');
-      break;
+    case 'HELP': G.view = 'help'; break;
   }
 }
 // Overhead test views (explored / full) stay open while moving or fighting; other views close.
@@ -879,7 +872,7 @@ function move(d) {
     // walking into stone hurts
     const now = gameNow(), d = rnd(2, 4);
     SFX.thud(); G.flash = now + 120; G.hp -= d; G.lastHurt = now;
-    if (G.hp <= 0) { die('YOU DASH YOURSELF AGAINST THE STONE.'); return; }
+    if (G.hp <= 0) { die('YOU DASH YOURSELF AGAINST THE STONE.', 'DASHED AGAINST THE STONE'); return; }
     checkFaint();
     msg('YOU WALK INTO A STONE WALL. OUCH!');
     return;
@@ -920,7 +913,7 @@ function exert(now) {
   // 4 steps/s in ~20, and ~8 steps/s in ~15 (you faint at 10 health before that happens).
   G.strain += 0.355 + 0.02 * G.fatigue + 0.125 * G.fatigue * G.fatigue;
   while (G.strain >= 1) { G.strain -= 1; G.hp -= 1; }
-  if (G.hp <= 0) { die('YOUR HEART BURSTS FROM EXERTION.'); return; }
+  if (G.hp <= 0) { die('YOUR HEART BURSTS FROM EXERTION.', 'YOUR HEART BURST FROM EXERTION'); return; }
   checkFaint();
   if (now > G.nextWarn) {
     if (G.fatigue >= 8) { msg('YOUR HEART HAMMERS. YOU MUST REST!'); G.nextWarn = now + 3000; }
@@ -1006,8 +999,37 @@ function quitToTitle() {
   G = null; cmd.placeholder = 'SEED (BLANK = RANDOM)';
   msg('YOU FLEE THE CRYPTS. YOUR GAME HAS ENDED.');
 }
-function win() { G.state = 'won'; G.view = 'main'; fadeMusicOut(); TUNES.victory(); msg('THE CROWN BURNS WARM IN YOUR HAND. YOU HAVE WON!'); msg('TYPE RESTART AND PRESS ENTER TO RETURN TO THE TITLE.'); }
-function die(why) { G.state = 'dead'; G.hp = 0; fadeMusicOut(); TUNES.death(); if (why) msg(why); msg('YOUR HEART FALLS SILENT. YOU HAVE PERISHED.'); msg('TYPE RESTART AND PRESS ENTER TO RETURN TO THE TITLE.'); }
+// ---------- best times ----------
+// Winning times are kept in the browser: the fastest overall and the fastest for each seed. Games on the
+// test maze (seed 0) or where test commands (XXX, REVEAL, SHIFT+F3) were used are not recorded.
+const BEST_KEY = 'vael-best', BEST_SEEDS_MAX = 200;
+let bestMemo = null;                                  // read once; the title screen asks every frame
+function loadBest() {
+  if (bestMemo) return bestMemo;
+  try {
+    const b = JSON.parse(localStorage.getItem(BEST_KEY) || 'null');
+    if (b && typeof b === 'object') return (bestMemo = { best: b.best || null, seeds: b.seeds && typeof b.seeds === 'object' ? b.seeds : {} });
+  } catch (e) { /* storage blocked or corrupt */ }
+  return (bestMemo = { best: null, seeds: {} });
+}
+function recordWin() {
+  const ms = G.playMs || 0, r = { ms };
+  if (G.seed === 0) { r.unrecorded = 'PLAYED ON THE TEST MAZE'; return r; }
+  if (G.tested) { r.unrecorded = 'TEST COMMANDS WERE USED'; return r; }
+  const b = loadBest(), key = String(G.seed);
+  r.newBest = !b.best || ms < b.best.ms;
+  r.newSeedBest = b.seeds[key] == null || ms < b.seeds[key];
+  if (r.newBest) b.best = { ms, seed: G.seed };
+  if (r.newSeedBest) { delete b.seeds[key]; b.seeds[key] = ms; }            // re-adding keeps it newest
+  const keys = Object.keys(b.seeds);
+  for (let i = 0; i < keys.length - BEST_SEEDS_MAX; i++) delete b.seeds[keys[i]];   // forget the oldest seeds
+  try { localStorage.setItem(BEST_KEY, JSON.stringify(b)); } catch (e) { /* ignore */ }
+  r.best = b.best; r.seedBest = b.seeds[key];
+  return r;
+}
+function deepestDepth() { return Math.max(G.lvl, ...Object.keys(G.levels).map(Number)); }
+function win() { G.state = 'won'; G.view = 'main'; G.result = recordWin(); fadeMusicOut(); TUNES.victory(); msg('THE CROWN BURNS WARM IN YOUR HAND. YOU HAVE WON!'); msg('TYPE RESTART AND PRESS ENTER TO RETURN TO THE TITLE.'); }
+function die(why, cause) { G.state = 'dead'; G.hp = 0; G.view = 'main'; G.cause = (cause || 'YOU PERISHED') + ' ON DEPTH ' + G.lvl; G.result = { seedBest: loadBest().seeds[G.seed] }; fadeMusicOut(); TUNES.death(); if (why) msg(why); msg('YOUR HEART FALLS SILENT. YOU HAVE PERISHED.'); msg('TYPE RESTART AND PRESS ENTER TO RETURN TO THE TITLE.'); }
 
 // ---------- simulation ----------
 function lightRange() {
@@ -1179,7 +1201,7 @@ function monsterAttack(m) {
   if (block && rel === 0) { d = Math.max(1, Math.round(d * (1 - block))); G.strike.res = 'block'; }
   G.hp -= d; G.lastHurt = gameNow(); G.flash = G.lastHurt + 160; SFX.hurt();
   msg((rel === 0 ? 'THE ' + m.name : 'SOMETHING') + ' STRIKES' + where + '!' + (block && rel === 0 ? ' (BLOCKED SOME)' : ''));
-  if (G.hp <= 0) die(); else checkFaint();
+  if (G.hp <= 0) die(null, 'SLAIN BY THE ' + m.name); else checkFaint();
 }
 // ---------- experience ----------
 // XP comes from kills and from picking up items. Rank rises with XP; higher rank means
@@ -1825,6 +1847,89 @@ function renderMap(mode, now) {
     for (const [t, c] of parts) { ctx.fillStyle = c; ctx.fillText(t, x, VH - 10); x += ctx.measureText(t).width; }
   }
 }
+// The panel over the view once the game is over: what happened, the run's numbers and best times.
+function renderEnd() {
+  const won = G.state === 'won', r = G.result || {};
+  ctx.fillStyle = 'rgba(0,0,0,0.78)'; ctx.fillRect(0, CY - 100, W, 200);
+  ctx.textAlign = 'center';
+  ctx.fillStyle = won ? col(1, RGB.item) : col(1, RGB.mon); ctx.font = gameFont(36);
+  ctx.fillText(won ? 'VICTORY' : 'YOU HAVE PERISHED', CX, CY - 52);
+  ctx.fillStyle = col(1); ctx.font = gameFont(17);
+  ctx.fillText(won ? 'THE EMBER CROWN IS YOURS' : (G.cause || ''), CX, CY - 20);
+  ctx.font = gameFont(15); ctx.fillStyle = col(0.85);
+  ctx.fillText(['TIME ' + fmtTime(G.playMs || 0), 'FOES SLAIN ' + G.kills, 'DEEPEST DEPTH ' + deepestDepth(),
+                'RANK ' + xpRank(), 'SEED ' + G.seed].join(HELP_SEP), CX, CY + 14);
+  let rec = '';
+  if (won) {
+    if (r.unrecorded) rec = 'TIME NOT RECORDED: ' + r.unrecorded;
+    else if (r.newBest) rec = 'A NEW BEST TIME!';
+    else if (r.newSeedBest) rec = 'A NEW BEST FOR THIS SEED!   OVERALL BEST ' + fmtTime(r.best.ms);
+    else rec = 'BEST FOR THIS SEED ' + fmtTime(r.seedBest) + '   OVERALL BEST ' + fmtTime(r.best.ms);
+  } else if (r.seedBest != null) rec = 'BEST WIN ON THIS SEED ' + fmtTime(r.seedBest);
+  if (rec) { ctx.fillStyle = col(1, RGB.item); ctx.fillText(rec, CX, CY + 42); }
+  ctx.fillStyle = col(0.6); ctx.font = gameFont(16); ctx.fillText('TYPE RESTART AND PRESS ENTER', CX, CY + 80);
+}
+// The HELP page: commands grouped in two columns, each with a short note. L|R means left or right hand.
+const HELP_PAGE = [
+  ['MOVING', [
+    ['MOVE', 'STEP FORWARD'],
+    ['MOVE BACK|LEFT|RIGHT', 'STEP THAT WAY'],
+    ['TURN LEFT|RIGHT|AROUND', 'FACE A NEW WAY'],
+    ['DESCEND  /  ASCEND', 'TAKE A LADDER'],
+    ['SLEEP [1-20]', 'REST TO HEAL'],
+  ]],
+  ['FIGHTING', [
+    ['ATTACK L|R', 'STRIKE WITH THAT HAND'],
+  ]],
+  ['ITEMS', [
+    ['GET L|R [ITEM]', 'PICK UP INTO A HAND'],
+    ['DROP L|R', 'PUT DOWN WHAT IT HOLDS'],
+    ['STOW L|R', 'PUT IT IN YOUR PACK'],
+    ['PULL L|R ITEM', 'TAKE IT FROM YOUR PACK'],
+    ['USE L|R  OR  USE ITEM', 'LIGHT, DRINK, READ'],
+    ['EXAMINE', 'SEE YOUR PACK'],
+  ]],
+  ['GAME', [
+    ['SAVE  /  LOAD', 'ONE SAVED GAME'],
+    ['PAUSE  /  QUIT', ''],
+    ['SEED [NUMBER]', 'SHOW OR CHANGE THE MAZE'],
+    ['SOUND|MUSIC [0-9]', 'VOLUME, 0 IS OFF'],
+    ['ANIMATE', 'MOVEMENT ANIMATION ON/OFF'],
+  ]],
+];
+// Left-aligned game text in which each | is drawn larger and a little lower, as in the message log,
+// so it doesn't look like the letter I.
+function fillPiped(text, x, y, px) {
+  text.split('|').forEach((part, i) => {
+    if (i) {
+      const big = px + (4 * 4 / 3) / GAME_FONT_SCALE;   // 4pt larger on screen (gameFont scales its size)
+      ctx.font = gameFont(big); ctx.fillText('|', x, y + big * 0.1 * GAME_FONT_SCALE);
+      x += ctx.measureText('|').width;
+    }
+    ctx.font = gameFont(px); ctx.fillText(part, x, y); x += ctx.measureText(part).width;
+  });
+}
+function renderHelp() {
+  ctx.textAlign = 'left'; ctx.fillStyle = col(1); ctx.font = gameFont(20);
+  ctx.fillText('COMMANDS', 40, 38);
+  const cols = [[HELP_PAGE[0], HELP_PAGE[1]], [HELP_PAGE[2], HELP_PAGE[3]]];
+  cols.forEach((sections, c) => {
+    const x = 40 + c * 380;
+    let y = 72;
+    for (const [title, rows] of sections) {
+      ctx.font = gameFont(15); ctx.fillStyle = col(1, RGB.item); ctx.fillText(title, x, y); y += 22;
+      for (const [cmd, note] of rows) {
+        ctx.fillStyle = col(1); fillPiped(cmd, x + 10, y, 14);
+        ctx.fillStyle = col(0.55); ctx.fillText(note, x + 190, y); y += 20;
+      }
+      y += 10;
+    }
+  });
+  ctx.font = gameFont(14); ctx.fillStyle = col(0.7);
+  fillPiped('L|R = LEFT OR RIGHT HAND.  WORDS MAY BE SHORTENED (M = MOVE).  ENTER REPEATS YOUR LAST COMMAND.', 40, 364, 14);
+  ctx.fillText('EVERY STEP TIRES YOU, AND HURRYING TIRES YOU MORE.  STAND STILL TO GET YOUR BREATH BACK.', 40, 386);
+  ctx.fillStyle = col(0.55); ctx.fillText('TYPE LOOK OR PRESS ESC TO RETURN', 40, 418);
+}
 function renderPack() {
   ctx.fillStyle = col(1); ctx.textAlign = 'left'; ctx.font = gameFont(20);
   ctx.fillText('YOUR PACK  (' + G.pack.length + '/' + PACK_MAX + ')', 60, 50);
@@ -1932,12 +2037,19 @@ function renderTitle(now) {
   ctx.fillText('A VECTOR DUNGEON CRAWL', CX, 130);
   ctx.font = titleFont(11); ctx.fillStyle = col(0.55);
   ctx.fillText('BY STEVE NORTON AND CLAUDE AI', CX, 151);
-  ctx.font = titleFont(18);
+  // instructions, top down: the saved-game line (only when there is one), then how to pick a maze
+  let y = 186;
+  ctx.font = titleFont(15);
+  if (hasSave()) { ctx.fillStyle = col(0.7, RGB.item); ctx.fillText('TYPE  LOAD  TO RESUME THE LAST SAVED GAME', CX, y); y += 32; }
   ctx.fillStyle = col(0.85);
-  ctx.fillText('TYPE A SEED NUMBER TO REPLAY A MAZE,', CX, 186);
-  ctx.fillText('OR LEAVE IT BLANK FOR A RANDOM ONE.', CX, 210);
-  if (lastSeed !== null) { ctx.fillStyle = col(0.55); ctx.fillText('LAST SEED: ' + lastSeed, CX, 240); }
-  if (hasSave()) { ctx.font = titleFont(15); ctx.fillStyle = col(0.7, RGB.item); ctx.fillText('TYPE  LOAD  TO RESUME THE LAST SAVED GAME', CX, 268); ctx.font = titleFont(18); }
+  ctx.fillText('TYPE A SEED NUMBER TO REPLAY A MAZE,', CX, y);
+  ctx.fillText('OR LEAVE IT BLANK FOR A RANDOM ONE.', CX, y + 20);
+  // last seed and best times share one line, so the layout never grows taller
+  const bt = loadBest(), parts = [];
+  if (lastSeed !== null) parts.push('LAST SEED: ' + lastSeed + (bt.seeds[lastSeed] != null ? ' (BEST ' + fmtTime(bt.seeds[lastSeed]) + ')' : ''));
+  if (bt.best) parts.push('BEST TIME: ' + fmtTime(bt.best.ms) + ' ON SEED ' + bt.best.seed);
+  if (parts.length) { ctx.fillStyle = col(0.55); ctx.fillText(parts.join('     '), CX, y + 48); }
+  ctx.font = titleFont(18);
   drawPolys(SHAPE.wraith(now), CX, 455, 84, 0.9, true, RGB.mon);
   ctx.fillStyle = col(0.5 + 0.5 * Math.sin(now / 300));
   ctx.fillText('PRESS ENTER TO BEGIN', CX, 488);
@@ -1952,7 +2064,7 @@ function render(now) {
   if (G.fainted && G.state === 'play') return;      // blacked out: blank screen
   ctx.save(); ctx.beginPath(); ctx.rect(0, 0, W, VH); ctx.clip();
   if (G.view === 'explored' || G.view === 'full') renderMap(G.view, now);
-  else if (G.view === 'pack') renderPack(); else renderView(now);
+  else if (G.view === 'pack') renderPack(); else if (G.view === 'help') renderHelp(); else renderView(now);
   if (now < G.flash) { ctx.fillStyle = col(0.25); ctx.fillRect(0, 0, W, VH); }
   if (G.pending && G.state === 'play') {
     ctx.fillStyle = 'rgba(0,0,0,0.75)'; ctx.fillRect(0, CY - 50, W, 100);
@@ -1967,12 +2079,7 @@ function render(now) {
     ctx.fillText('PAUSED', CX, CY + 2);
     ctx.font = gameFont(15); ctx.fillText('ENTER ANY COMMAND TO RESUME', CX, CY + 30);
   }
-  if (G.state !== 'play') {
-    ctx.fillStyle = 'rgba(0,0,0,0.6)'; ctx.fillRect(0, CY - 50, W, 100);
-    ctx.fillStyle = col(1); ctx.textAlign = 'center'; ctx.font = gameFont(36);
-    ctx.fillText(G.state === 'won' ? 'VICTORY' : 'YOU HAVE PERISHED', CX, CY + 6);
-    ctx.font = gameFont(16); ctx.fillText('TYPE RESTART AND PRESS ENTER', CX, CY + 36);
-  }
+  if (G.state !== 'play') renderEnd();
   ctx.restore();
   renderStatus(now);
   const dark = sleepDarkness();                     // SLEEP: fade the whole screen to black and back
@@ -2008,7 +2115,7 @@ document.addEventListener('click', () => cmd.focus());
 cmd.addEventListener('keydown', e => {
   ac();
   if (G && G.state === 'play' && !G.fainted) {
-    if (e.key === 'F3' && e.shiftKey) { e.preventDefault(); G.view = G.view === 'full' ? 'main' : 'full'; return; }
+    if (e.key === 'F3' && e.shiftKey) { e.preventDefault(); G.view = G.view === 'full' ? 'main' : 'full'; G.tested = true; return; }
     if (e.key === 'Escape') { e.preventDefault(); G.view = 'main'; return; }
   }
   if (!G) {
