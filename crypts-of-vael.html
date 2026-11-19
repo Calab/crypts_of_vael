@@ -5,11 +5,13 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Crypts of Vael</title>
 <style>
+  @font-face { font-family:"Foul Fiend"; src:url("fonts/Foul%20Fiend.otf") format("opentype"); }
+  @font-face { font-family:"Swinging Wake"; src:url("fonts/Swinging%20Wake.otf") format("opentype"); }
   :root { --fg:#7dff9a; --dim:#2f7a45; --bg:#000; }
   html,body { background:var(--bg); color:var(--fg); margin:0; }
   :root { --fs:15px; }
   html,body { min-height:100%; }   /* below the minimum size the page scrolls instead of shrinking */
-  body { font-family:"Courier New",Courier,monospace; padding:0 16px; }
+  body { font-family:"Foul Fiend","Courier New",Courier,monospace; font-size-adjust:cap-height 0.86; padding:0 16px; }
   #wrap { padding:12px 0; box-sizing:border-box; margin:0 auto; }
   canvas { display:block; background:#000; border:1px solid #1d4a28; box-sizing:border-box; }
   #log { height:8.2em; overflow:hidden; white-space:pre-wrap; font-size:var(--fs); line-height:1.36em;
@@ -18,7 +20,7 @@
   #row { display:flex; align-items:center; gap:6px; border-top:1px solid #1d4a28; padding-top:6px; }
   #row span { font-size:calc(var(--fs) + 1px); }
   #cmd { flex:1; background:#000; color:var(--fg); border:none; outline:none;
-         font:calc(var(--fs) + 1px) "Courier New",monospace; text-transform:uppercase; caret-color:var(--fg); }
+         font:calc(var(--fs) + 1px) "Foul Fiend","Courier New",monospace; font-size-adjust:cap-height 0.86; text-transform:uppercase; caret-color:var(--fg); }
   #cmd::placeholder { color:var(--dim); }
   #hint { color:var(--dim); font-size:calc(var(--fs) * 0.8); margin-top:6px; }
 </style>
@@ -36,6 +38,18 @@
 "use strict";
 // ---------- setup ----------
 const cv = document.getElementById('cv'), ctx = cv.getContext('2d');
+// Fonts (in the fonts folder). Canvas text sizes were written with Courier New in mind, so each font
+// has a scale that keeps its capital letters about the same height as before.
+// Swinging Wake's capitals are about 1.4x Courier's; Foul Fiend's are about 2x.
+const GAME_FONT = '"Foul Fiend","Courier New",monospace';      // the playing screen
+const GAME_FONT_SCALE = 0.62;
+const gameFont = px => Math.round(px * GAME_FONT_SCALE) + 'px ' + GAME_FONT;
+const TITLE_FONT = '"Swinging Wake","Courier New",monospace';  // the title screen
+const TITLE_FONT_SCALE = 1;
+const titleFont = px => Math.round(px * TITLE_FONT_SCALE) + 'px ' + TITLE_FONT;
+// Canvas text alone doesn't make the browser download a web font, so ask for both up front.
+// Until they arrive (or if the files are missing) the text falls back to Courier New.
+if (document.fonts) for (const f of ['16px "Foul Fiend"', '16px "Swinging Wake"']) document.fonts.load(f).catch(() => {});
 const VERSION = '1.0.0';               // shown in the lower right of the title page
 const W = 800, H = 500, VH = 440;   // logical drawing size; the canvas is scaled to fit the window
 let SCALE = 1;
@@ -540,9 +554,9 @@ function drawLog() {
 }
 
 // ---------- commands ----------
-const VERBS = ['MOVE', 'REVEAL', 'TURN', 'ATTACK', 'GET', 'DROP', 'STOW', 'PULL', 'USE', 'LOOK', 'EXAMINE', 'DESCEND', 'ASCEND', 'SAVE', 'LOAD', 'PAUSE', 'HELP', 'SOUND', 'MUSIC', 'SEED', 'ANIMATE', 'X'];
+const VERBS = ['MOVE', 'REVEAL', 'TURN', 'ATTACK', 'GET', 'DROP', 'STOW', 'PULL', 'USE', 'LOOK', 'EXAMINE', 'DESCEND', 'ASCEND', 'SAVE', 'LOAD', 'PAUSE', 'QUIT', 'HELP', 'SOUND', 'MUSIC', 'SEED', 'ANIMATE', 'X'];
 // These commands must be typed in full, so a stray letter can't open the test map views.
-const FULL_WORD_ONLY = ['REVEAL'];
+const FULL_WORD_ONLY = ['REVEAL', 'QUIT'];
 function matchWord(tok, list) { return list.find(w => FULL_WORD_ONLY.includes(w) ? w === tok : w.startsWith(tok)); }
 function handArg(tok) {
   if (!tok) return -1;
@@ -563,6 +577,13 @@ function exec(line) {
     if (matchWord(t[0], VERBS) === 'PAUSE') return;
   }
   if (G.fainted) { msg('YOU ARE UNCONSCIOUS...'); return; }
+  // Waiting for an answer to "quit this game?"
+  if (G.pending && G.pending.quit) {
+    if ('YES'.startsWith(t[0])) quitToTitle();
+    else if ('NO'.startsWith(t[0])) { G.pending = null; msg('YOU PRESS ON.'); }
+    else msg('QUIT THIS GAME? ANSWER Y OR N.');
+    return;
+  }
   // Waiting for an answer to "start over in a new maze?"
   if (G.pending) {
     if ('YES'.startsWith(t[0])) { const sd = G.pending.seed; G.pending = null; newGame(sd); }
@@ -673,6 +694,10 @@ function exec(line) {
       msg('YOU CLIMB UP TO DEPTH ' + G.lvl + '.');
       break;
     }
+    case 'QUIT':
+      G.pending = { quit: true };
+      msg('QUIT THIS GAME AND RETURN TO THE TITLE? UNSAVED PROGRESS WILL BE LOST. (Y/N)');
+      break;
     case 'PAUSE': G.paused = true; fadeMusicOut(); msg('GAME PAUSED. ENTER ANY COMMAND TO RESUME.'); break;
     case 'SAVE': saveGame(); break;
     case 'LOAD': loadGame(); break;
@@ -713,7 +738,7 @@ function exec(line) {
       msg('MOVE [BACK|LEFT|RIGHT]   TURN LEFT|RIGHT|AROUND   ATTACK L|R   DESCEND  ASCEND');
       msg('GET L|R [ITEM]  DROP L|R  STOW L|R  PULL L|R ITEM  USE L|R|ITEM');
       msg('USE MAP SHOWS WHERE YOU HAVE BEEN (YOU START WITH A MAP IN YOUR PACK).');
-      msg('SAVE  LOAD  PAUSE  EXAMINE (PACK)  LOOK  SEED  SOUND [0-9]  MUSIC [0-9]  ANIMATE.  WORDS MAY BE ABBREVIATED.');
+      msg('SAVE  LOAD  PAUSE  QUIT  EXAMINE (PACK)  LOOK  SEED  SOUND [0-9]  MUSIC [0-9]  ANIMATE.  WORDS MAY BE ABBREVIATED.');
       msg('EVERY STEP TIRES YOU; HURRYING TIRES YOU MORE. STAND STILL TO RECOVER.');
       break;
   }
@@ -847,6 +872,12 @@ function testKill() {
   G.swing = { t: performance.now(), h: 1, it: G.hands[1] }; mapSafeView();
   killMonster(m);
 }
+// Ends the current game early and goes back to the title screen. A SAVEd game is kept.
+function quitToTitle() {
+  stopMusic(); fadeMusicOut();
+  G = null; cmd.placeholder = 'SEED (BLANK = RANDOM)';
+  msg('YOU FLEE THE CRYPTS. YOUR GAME HAS ENDED.');
+}
 function win() { G.state = 'won'; G.view = 'main'; fadeMusicOut(); TUNES.victory(); msg('THE CROWN BURNS WARM IN YOUR HAND. YOU HAVE WON!'); msg('TYPE RESTART AND PRESS ENTER TO RETURN TO THE TITLE.'); }
 function die(why) { G.state = 'dead'; G.hp = 0; fadeMusicOut(); TUNES.death(); if (why) msg(why); msg('YOUR HEART FALLS SILENT. YOU HAVE PERISHED.'); msg('TYPE RESTART AND PRESS ENTER TO RETURN TO THE TITLE.'); }
 
@@ -876,10 +907,10 @@ function update(now) {
     if (G.light.rem <= 0) { msg('YOUR ' + G.light.name + ' GUTTERS OUT. DARKNESS.'); G.light = null; }
   }
   // regeneration
-  // resting (not hurt for 3s, standing still for 1.5s) restores 1 health every 2 seconds
+  // resting (not hurt for 3s, standing still for 1.5s) restores 1 health every 1.2 seconds
   if (now - G.lastHurt > 3000 && now - G.lastMove > 1500 && G.fatigue < 5 && G.hp < G.maxhp) {
     G.regen = (G.regen || 0) + dt;
-    if (G.regen >= 2000) { G.regen = 0; G.hp++; }
+    if (G.regen >= 1200) { G.regen = 0; G.hp++; }
   }
   checkFaint();
   // monsters
@@ -1351,7 +1382,7 @@ function drawSwing(now) {
 function renderOverlay(now) {
   if (G.swing && now - G.swing.t < SWING_MS) drawSwing(now);
   if (!G.light) {
-    ctx.fillStyle = col(0.35); ctx.font = '14px "Courier New",monospace'; ctx.textAlign = 'center';
+    ctx.fillStyle = col(0.35); ctx.font = gameFont(14); ctx.textAlign = 'center';
     ctx.fillText('IT IS DARK. YOU CAN BARELY SEE.', CX, 24);
   }
 }
@@ -1426,7 +1457,7 @@ function renderMap(mode, now) {
       const X = ox + o.x * cs + cs / 2, Y = oy + o.y * cs + cs / 2, r = cs * 0.28;
       ctx.beginPath(); ctx.moveTo(X, Y - r); ctx.lineTo(X + r, Y); ctx.lineTo(X, Y + r); ctx.lineTo(X - r, Y); ctx.closePath(); ctx.stroke();
     }
-    ctx.font = 'bold ' + Math.max(9, cs - 1) + 'px "Courier New",monospace';
+    ctx.font = gameFont(Math.max(9, cs - 1));
     for (const m of L.mons) {
       ctx.fillStyle = MAPCOL.mon; ctx.globalAlpha = now < m.hurt ? 0.4 : 1;
       ctx.fillText(MAPCH[m.k], ox + m.x * cs + cs / 2, oy + m.y * cs + cs / 2 + 1);
@@ -1443,37 +1474,37 @@ function renderMap(mode, now) {
   ctx.closePath(); ctx.fill();
   // header / legend
   ctx.textBaseline = 'alphabetic'; ctx.textAlign = 'left'; ctx.fillStyle = col(1);
-  ctx.font = 'bold 16px "Courier New",monospace';
+  ctx.font = gameFont(16);
   const title = { explored: 'YOUR MAP', full: 'FULL MAZE (TEST VIEW)' }[mode] || 'MAP';
   ctx.fillText(title + ' - DEPTH ' + G.lvl, 14, 22);
-  ctx.textAlign = 'right'; ctx.fillStyle = col(0.55); ctx.font = '13px "Courier New",monospace';
+  ctx.textAlign = 'right'; ctx.fillStyle = col(0.55); ctx.font = gameFont(13);
   ctx.fillText(mode === 'full' ? 'SHIFT+F3 OR ESC TO CLOSE' : 'LOOK OR ESC TO CLOSE', W - 14, 22);
   if (mode === 'full') {
     // colour-coded legend, laid out piece by piece and centred
     const parts = [['S MOULD C CRAWLER T TOAD H HOUND W WRAITH G GOLEM K KING  ', MAPCOL.mon], ['◇ ITEM ▪ CARRIED  ', MAPCOL.item],
                    ['V DOWN ^ UP  ', MAPCOL.ladder], [L.mons.length + ' FOES ' + L.items.length + ' ITEMS', col(0.55)]];
-    ctx.textAlign = 'left'; ctx.font = '12px "Courier New",monospace';
+    ctx.textAlign = 'left'; ctx.font = gameFont(12);
     let x = CX - parts.reduce((w, [t]) => w + ctx.measureText(t).width, 0) / 2;
     for (const [t, c] of parts) { ctx.fillStyle = c; ctx.fillText(t, x, VH - 10); x += ctx.measureText(t).width; }
   }
 }
 function renderPack() {
-  ctx.fillStyle = col(1); ctx.textAlign = 'left'; ctx.font = 'bold 20px "Courier New",monospace';
+  ctx.fillStyle = col(1); ctx.textAlign = 'left'; ctx.font = gameFont(20);
   ctx.fillText('YOUR PACK  (' + G.pack.length + '/' + PACK_MAX + ')', 60, 50);
-  ctx.font = '18px "Courier New",monospace';
+  ctx.font = gameFont(18);
   if (!G.pack.length) ctx.fillText('- EMPTY -', 80, 85);
   G.pack.forEach((it, i) => ctx.fillText((i + 1) + '. ' + it.name, 80, 85 + i * 26));
   const here = itemsAt(G.p.x, G.p.y);
-  ctx.font = 'bold 20px "Courier New",monospace';
+  ctx.font = gameFont(20);
   ctx.fillText('ON THE FLOOR', 470, 50);
-  ctx.font = '18px "Courier New",monospace';
+  ctx.font = gameFont(18);
   if (!here.length) ctx.fillText('- NOTHING -', 490, 85);
   here.forEach((o, i) => ctx.fillText(o.it.name, 490, 85 + i * 26));
   ctx.fillStyle = col(0.6);
-  ctx.fillText('LIGHT: ' + (G.light ? G.light.name + ' (' + Math.ceil(G.light.rem) + 's)' : 'NONE'), 60, 340);
-  ctx.fillText('FACING ' + DIRN[G.p.dir] + '   DEPTH ' + G.lvl + '   FOES SLAIN ' + G.kills, 60, 370);
-  ctx.fillText('RANK ' + xpRank() + ' (XP ' + G.xp + ')   DMG +' + strikeBonus() + '   DODGE ' + Math.round(evasion() * 100) + '%   SEED ' + G.seed, 60, 398);
-  ctx.fillText('TYPE LOOK TO RETURN', 60, 410);
+  ctx.fillText('LIGHT: ' + (G.light ? G.light.name + ' (' + Math.ceil(G.light.rem) + 's)' : 'NONE'), 60, 334);
+  ctx.fillText('FACING ' + DIRN[G.p.dir] + '   DEPTH ' + G.lvl + '   FOES SLAIN ' + G.kills, 60, 362);
+  ctx.fillText('RANK ' + xpRank() + ' (XP ' + G.xp + ')   DMG +' + strikeBonus() + '   DODGE ' + Math.round(evasion() * 100) + '%   SEED ' + G.seed, 60, 390);
+  ctx.fillText('TYPE LOOK TO RETURN', 60, 418);
 }
 function heart(x, y, s, a) {
   const P = [];
@@ -1485,7 +1516,7 @@ function heart(x, y, s, a) {
 }
 function renderStatus(now) {
   ctx.strokeStyle = col(0.4); ctx.lineWidth = 1; line(0, VH + 0.5, W, VH + 0.5);
-  ctx.font = 'bold 18px "Courier New",monospace'; ctx.fillStyle = col(1);
+  ctx.font = gameFont(18); ctx.fillStyle = col(1);
   const hn = it => it ? it.name : 'EMPTY';
   const hc = it => it ? col(1, RGB.item) : col(1);   // held item in yellow, empty hand in green
   ctx.textAlign = 'left'; ctx.fillStyle = hc(G.hands[0]); ctx.fillText('L: ' + hn(G.hands[0]), 14, VH + 36);
@@ -1493,18 +1524,74 @@ function renderStatus(now) {
   ctx.fillStyle = col(1);
   const pulse = G.state === 'play' ? 1 + 0.35 * Math.exp(-(now - G.beatT) / 110) : 1;
   heart(CX - 46, VH + 30, 15 * pulse, G.state === 'dead' ? 0.3 : 1);
-  ctx.textAlign = 'left'; ctx.font = '16px "Courier New",monospace'; ctx.fillStyle = col(1);
+  ctx.textAlign = 'left'; ctx.font = gameFont(16); ctx.fillStyle = col(1);
   ctx.fillText(Math.max(0, G.hp) + '/' + G.maxhp, CX - 22, VH + 28);
-  ctx.fillStyle = col(0.55); ctx.font = '13px "Courier New",monospace';
+  ctx.fillStyle = col(0.55); ctx.font = gameFont(13);
   ctx.fillText('DEPTH ' + G.lvl + (G.fatigue >= 8 ? '  EXHAUSTED' : G.fatigue >= 4 ? '  WINDED' : ''), CX - 22, VH + 46);
   ctx.textAlign = 'right'; ctx.fillText('SEED ' + G.seed, W - 14, VH + 14);
   ctx.textAlign = 'left'; ctx.fillStyle = col(0.7, RGB.item);
   ctx.fillText('RANK ' + xpRank() + '   XP ' + G.xp, 14, VH + 14);
 }
+// ---------- title-screen attract mode ----------
+// A separate demo maze (never part of a real game) that an invisible explorer wanders through behind the
+// title. It is swapped in as G only while it is being drawn, so the normal corridor renderer can be reused.
+const DEMO_MOVE_MS = 650, DEMO_TURN_MS = 750, DEMO_PAUSE_MS = 200, DEMO_STEPS = 400;
+let DEMO = null;
+function makeDemo() {
+  const saved = G, seed = 1 + Math.floor(Math.random() * 999999);
+  G = { seed, levels: {} };
+  let L;
+  try { L = makeLevel(1 + Math.floor(Math.random() * 3)); } finally { G = saved; }
+  L.mons = [];                                      // the explorer would walk straight through them
+  const p = { x: 1, y: 1, dir: 0 };
+  for (let d = 0; d < 4; d++) if (L.g[(p.y + DY[d]) * L.S + p.x + DX[d]] === 0) { p.dir = d; break; }
+  DEMO = { seed, L, p, light: { range: 5, rem: 1e9 }, anim: null, swing: null, state: 'play',
+           visits: new Uint16Array(L.S * L.S), next: 0, steps: 0 };
+  DEMO.visits[p.y * L.S + p.x] = 1;
+}
+// Picks the next move: head for the least-visited open neighbour (ties favour going straight), so the
+// explorer covers the whole maze instead of pacing back and forth. Runs with G = DEMO.
+function demoStep(now) {
+  const D = DEMO, a = D.anim;
+  if ((a && now < a.t0 + a.dur) || now < D.next) return;
+  const { L, p } = D, S = L.S;
+  let best = -1, bestScore = Infinity;
+  for (let d = 0; d < 4; d++) {
+    const x = p.x + DX[d], y = p.y + DY[d];
+    if (isWall(x, y)) continue;
+    const score = D.visits[y * S + x] * 10 + (d === p.dir ? 0 : d === (p.dir + 2) % 4 ? 6 : 3) + Math.random() * 2;
+    if (score < bestScore) { bestScore = score; best = d; }
+  }
+  if (best < 0) return;
+  if (best !== p.dir) {                             // turn to face it first; the step comes next time
+    const r = (best - p.dir + 4) % 4, steps = r === 2 ? 2 : 1, sign = r === 3 ? -1 : r === 1 ? 1 : (Math.random() < 0.5 ? 1 : -1);
+    D.anim = { type: 'turn', fromDir: p.dir, sign, steps, t0: now, dur: DEMO_TURN_MS * steps };
+    p.dir = best;
+  } else {
+    D.anim = { type: 'move', from: { x: p.x, y: p.y, dir: p.dir }, back: false, t0: now, dur: DEMO_MOVE_MS };
+    p.x += DX[best]; p.y += DY[best];
+    D.visits[p.y * S + p.x]++;
+    D.steps++;
+  }
+  D.next = D.anim.t0 + D.anim.dur + DEMO_PAUSE_MS;
+}
+function renderDemo(now) {
+  if (!DEMO || DEMO.steps >= DEMO_STEPS) makeDemo();   // a fresh maze every so often
+  const saved = G, savedAnim = animOn;
+  G = DEMO; animOn = true;                          // always glide on the title, even if ANIMATE is off
+  try {
+    demoStep(now);
+    ctx.save(); ctx.beginPath(); ctx.rect(0, 0, W, VH); ctx.clip();
+    renderView(now);
+    ctx.restore();
+  } finally { G = saved; animOn = savedAnim; }
+  ctx.fillStyle = 'rgba(0,0,0,0.55)'; ctx.fillRect(0, 0, W, H);   // dim it so the title stays readable
+}
 function renderTitle(now) {
+  renderDemo(now);
   ctx.textAlign = 'center'; ctx.fillStyle = col(1, RGB.item);
-  ctx.font = 'bold 54px "Courier New",monospace'; ctx.fillText('CRYPTS OF VAEL', CX, 95);
-  ctx.font = '18px "Courier New",monospace'; ctx.fillStyle = col(0.7);
+  ctx.font = titleFont(54); ctx.fillText('CRYPTS OF VAEL', CX, 95);
+  ctx.font = titleFont(18); ctx.fillStyle = col(0.7);
   ctx.fillText('A VECTOR DUNGEON CRAWL', CX, 130);
   ctx.fillStyle = col(0.85);
   ctx.fillText('TYPE A SEED NUMBER TO REPLAY A MAZE,', CX, 178);
@@ -1514,7 +1601,7 @@ function renderTitle(now) {
   drawPolys(SHAPE.wraith(now), CX, 455, 92, 0.9, true, RGB.mon);
   ctx.fillStyle = col(0.5 + 0.5 * Math.sin(now / 300));
   ctx.fillText('PRESS ENTER TO BEGIN', CX, 488);
-  ctx.textAlign = 'right'; ctx.font = '13px "Courier New",monospace'; ctx.fillStyle = col(0.5);
+  ctx.textAlign = 'right'; ctx.font = titleFont(16); ctx.fillStyle = col(0.5);
   ctx.fillText('V' + VERSION, W - 10, H - 10);
 }
 function render(now) {
@@ -1528,22 +1615,22 @@ function render(now) {
   if (now < G.flash) { ctx.fillStyle = col(0.25); ctx.fillRect(0, 0, W, VH); }
   if (G.pending && G.state === 'play') {
     ctx.fillStyle = 'rgba(0,0,0,0.75)'; ctx.fillRect(0, CY - 50, W, 100);
-    ctx.fillStyle = col(1); ctx.textAlign = 'center'; ctx.font = 'bold 26px "Courier New",monospace';
-    ctx.fillText('START OVER IN MAZE ' + G.pending.seed + '?', CX, CY + 2);
-    ctx.font = '16px "Courier New",monospace';
-    ctx.fillText('Y = NEW MAZE      N = STAY WHERE YOU ARE', CX, CY + 32);
+    ctx.fillStyle = col(1); ctx.textAlign = 'center'; ctx.font = gameFont(26);
+    ctx.fillText(G.pending.quit ? 'QUIT THIS GAME?' : 'START OVER IN MAZE ' + G.pending.seed + '?', CX, CY + 2);
+    ctx.font = gameFont(16);
+    ctx.fillText(G.pending.quit ? 'Y = RETURN TO THE TITLE      N = KEEP PLAYING' : 'Y = NEW MAZE      N = STAY WHERE YOU ARE', CX, CY + 32);
   }
   if (G.paused && G.state === 'play' && !G.pending) {
     ctx.fillStyle = 'rgba(0,0,0,0.72)'; ctx.fillRect(0, CY - 48, W, 96);
-    ctx.fillStyle = col(1); ctx.textAlign = 'center'; ctx.font = 'bold 34px "Courier New",monospace';
+    ctx.fillStyle = col(1); ctx.textAlign = 'center'; ctx.font = gameFont(34);
     ctx.fillText('PAUSED', CX, CY + 2);
-    ctx.font = '15px "Courier New",monospace'; ctx.fillText('ENTER ANY COMMAND TO RESUME', CX, CY + 30);
+    ctx.font = gameFont(15); ctx.fillText('ENTER ANY COMMAND TO RESUME', CX, CY + 30);
   }
   if (G.state !== 'play') {
     ctx.fillStyle = 'rgba(0,0,0,0.6)'; ctx.fillRect(0, CY - 50, W, 100);
-    ctx.fillStyle = col(1); ctx.textAlign = 'center'; ctx.font = 'bold 36px "Courier New",monospace';
+    ctx.fillStyle = col(1); ctx.textAlign = 'center'; ctx.font = gameFont(36);
     ctx.fillText(G.state === 'won' ? 'VICTORY' : 'YOU HAVE PERISHED', CX, CY + 6);
-    ctx.font = '16px "Courier New",monospace'; ctx.fillText('TYPE RESTART AND PRESS ENTER', CX, CY + 36);
+    ctx.font = gameFont(16); ctx.fillText('TYPE RESTART AND PRESS ENTER', CX, CY + 36);
   }
   ctx.restore();
   renderStatus(now);
@@ -1580,7 +1667,7 @@ cmd.addEventListener('keydown', e => {
     if (G.state !== 'play') {
       // Game over: only a deliberate RESTART leaves this screen, so stray Enter presses are ignored.
       cmd.value = '';
-      if (v.toUpperCase() === 'RESTART') { stopMusic(); G = null; cmd.placeholder = 'SEED (BLANK = RANDOM)'; }
+      if (v.toUpperCase() === 'RESTART' || v.toUpperCase() === 'QUIT') { stopMusic(); G = null; cmd.placeholder = 'SEED (BLANK = RANDOM)'; }
       else if (v) msg('THE GAME IS OVER. TYPE RESTART TO RETURN TO THE TITLE.');
       return;
     }
