@@ -1937,7 +1937,7 @@ function renderTitle(now) {
   ctx.fillText('TYPE A SEED NUMBER TO REPLAY A MAZE,', CX, 186);
   ctx.fillText('OR LEAVE IT BLANK FOR A RANDOM ONE.', CX, 210);
   if (lastSeed !== null) { ctx.fillStyle = col(0.55); ctx.fillText('LAST SEED: ' + lastSeed, CX, 240); }
-  if (hasSave()) { ctx.fillStyle = col(0.7, RGB.item); ctx.fillText('TYPE  LOAD  TO RESUME YOUR SAVED GAME', CX, 270); }
+  if (hasSave()) { ctx.font = titleFont(15); ctx.fillStyle = col(0.7, RGB.item); ctx.fillText('TYPE  LOAD  TO RESUME THE LAST SAVED GAME', CX, 268); ctx.font = titleFont(18); }
   drawPolys(SHAPE.wraith(now), CX, 455, 84, 0.9, true, RGB.mon);
   ctx.fillStyle = col(0.5 + 0.5 * Math.sin(now / 300));
   ctx.fillText('PRESS ENTER TO BEGIN', CX, 488);
