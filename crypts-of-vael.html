@@ -660,9 +660,9 @@ function drawLog() {
 
 // ---------- commands ----------
 const HELP_SEP = '  •  ';   // bullet between commands on the HELP screen
-const VERBS = ['MOVE', 'REVEAL', 'TURN', 'ATTACK', 'GET', 'DROP', 'STOW', 'PULL', 'USE', 'LOOK', 'EXAMINE', 'DESCEND', 'ASCEND', 'SAVE', 'LOAD', 'PAUSE', 'QUIT', 'SLEEP', 'HELP', 'SOUND', 'MUSIC', 'SEED', 'ANIMATE', 'X'];
-// These commands must be typed in full, so a stray letter can't open the test map views.
-const FULL_WORD_ONLY = ['REVEAL', 'QUIT'];
+const VERBS = ['MOVE', 'REVEAL', 'TURN', 'ATTACK', 'GET', 'DROP', 'STOW', 'PULL', 'USE', 'LOOK', 'EXAMINE', 'DESCEND', 'ASCEND', 'SAVE', 'LOAD', 'PAUSE', 'QUIT', 'SLEEP', 'HELP', 'SOUND', 'MUSIC', 'SEED', 'ANIMATE', 'XXX'];
+// These commands must be typed in full, so a stray letter can't open the test map views, quit or use XXX.
+const FULL_WORD_ONLY = ['REVEAL', 'QUIT', 'XXX'];
 function matchWord(tok, list) { return list.find(w => FULL_WORD_ONLY.includes(w) ? w === tok : w.startsWith(tok)); }
 function handArg(tok) {
   if (!tok) return -1;
@@ -815,7 +815,7 @@ function exec(line) {
     case 'PAUSE': pauseGame(false); msg('GAME PAUSED. ENTER ANY COMMAND TO RESUME.'); break;
     case 'SAVE': saveGame(); break;
     case 'LOAD': loadGame(); break;
-    case 'X': testKill(); break;
+    case 'XXX': testKill(); break;
     case 'ANIMATE':
       animOn = !animOn; G.anim = null;
       try { localStorage.setItem('vael-animate', animOn ? 'on' : 'off'); } catch (e) { /* ignore */ }
@@ -970,22 +970,32 @@ function attack(h) {
   if (m.hp <= 0) killMonster(m);
   else msg('YOU HIT THE ' + m.name + '!');
 }
+// How each kind of monster dies (follows "THE <NAME> ").
+const DEATH = {
+  mould: 'DISSOLVES INTO A HISSING PUDDLE!',
+  crawler: 'CURLS UP ITS LEGS AND LIES STILL!',
+  skeleton: 'CRUMBLES INTO A HEAP OF BONES!',
+  hound: 'CRUMBLES TO DUST!',
+  wraith: 'FADES OUT WITH A LAST SIGH!',
+  golem: 'TUMBLES DOWN WITH A CRASH!',
+  king: 'COLLAPSES INTO EMPTY ROBES!',
+};
 function killMonster(m) {
   G.L.mons.splice(G.L.mons.indexOf(m), 1); SFX.kill(); G.kills++;
-  gainXP(XP_PER_KILL[m.k] || 4);
+  msg('THE ' + m.name + ' ' + (DEATH[m.k] || 'FALLS AND IS GONE!'));
+  gainXP(XP_PER_KILL[m.k] || 4);                     // after the death message, so a rank-up reads as its result
   G.maxhp = Math.min(250, G.maxhp + 4);
-  msg('THE ' + m.name + ' CRUMBLES AND IS GONE!');
   if (m.carry) { G.L.items.push({ x: m.x, y: m.y, it: m.carry }); msg('IT DROPS ' + aName(m.carry) + '!'); }
   if (m.k === 'king') {
     G.L.items.push({ x: m.x, y: m.y, it: makeItem('crown') });
     msg('SOMETHING GLOWS WHERE THE KING FELL...');
   }
 }
-// TEST COMMAND (X): instantly kill the monster in front, or failing that any monster next to you.
+// TEST COMMAND (XXX): instantly kill the monster in front, or failing that any monster next to you.
 function testKill() {
   const front = monAt(G.p.x, G.p.y) || monAt(G.p.x + DX[G.p.dir], G.p.y + DY[G.p.dir]);
   const m = front || [0, 1, 2, 3].map(d => monAt(G.p.x + DX[d], G.p.y + DY[d])).find(Boolean);
-  if (!m) { msg('X: NO MONSTER NEXT TO YOU.'); return; }
+  if (!m) { msg('XXX: NO MONSTER NEXT TO YOU.'); return; }
   G.swing = { t: gameNow(), h: 1, it: G.hands[1] }; mapSafeView();
   killMonster(m);
 }
