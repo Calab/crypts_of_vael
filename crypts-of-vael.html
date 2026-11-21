@@ -56,7 +56,7 @@ const titleFont = px => Math.round(px * TITLE_FONT_SCALE) + 'px ' + TITLE_FONT;
 // Canvas text alone doesn't make the browser download a web font, so ask for both up front.
 // Until they arrive (or if the files are missing) the text falls back to Courier New.
 if (document.fonts) for (const f of ['16px "Foul Fiend"', '16px "Swinging Wake"']) document.fonts.load(f).catch(() => {});
-const VERSION = '1.1.0';               // shown in the lower right of the title page
+const VERSION = '1.1.1';               // shown in the lower right of the title page
 const W = 800, H = 500, VH = 440;   // logical drawing size; the canvas is scaled to fit the window
 let SCALE = 1;
 const MIN_W = 640;                    // smallest game width (640x400 drawing area + text = about 640x480)
@@ -441,7 +441,7 @@ const ITEMS = {
   tower:    { name: 'TOWER SHIELD', type: 'shield', block: 0.5 },
   torch:    { name: 'PITCH TORCH', type: 'light', range: 4, dur: 200 },
   lantern:  { name: 'OIL LANTERN', type: 'light', range: 7, dur: 420 },
-  mending:  { name: 'MENDING DRAUGHT', type: 'potion', heal: 50 },
+  mending:  { name: 'MENDING BREW', type: 'potion', heal: 50 },
   herb:     { name: 'HEALING HERB', type: 'potion', heal: 20 },
   vigor:    { name: 'VIGOR TONIC', type: 'potion', max: 20 },
   map:      { name: 'DUNGEON MAP', type: 'map' },
@@ -637,6 +637,9 @@ function loadGame() {
   for (const n in G.levels) for (const m of G.levels[n].mons) {
     if (m.k === 'toad') Object.assign(m, { k: 'skeleton', name: MON.skeleton.name, sound: MON.skeleton.sound, cry: MON.skeleton.cry });   // saves from before the toad was replaced
     m.nextMove = 0; m.nextAtk = 0; m.nextCry = 0; m.hurt = 0; }
+  const rename = it => { if (it && ITEMS[it.kind]) it.name = ITEMS[it.kind].name; };   // saves from before an item was renamed
+  for (const n in G.levels) { for (const o of G.levels[n].items) rename(o.it); for (const m of G.levels[n].mons) rename(m.carry); }
+  G.hands.forEach(rename); G.pack.forEach(rename);
   logClear();
   msg('GAME LOADED - DEPTH ' + G.lvl + ', ' + Math.max(0, G.hp) + '/' + G.maxhp + ' HEALTH, RANK ' + xpRank() + '.');
   cmd.placeholder = '';
