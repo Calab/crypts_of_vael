@@ -665,7 +665,7 @@ function drawLog() {
 
 // ---------- commands ----------
 const HELP_SEP = '  •  ';   // bullet between items in a list, e.g. the end-of-game numbers
-const VERBS = ['MOVE', 'REVEAL', 'TURN', 'ATTACK', 'GET', 'DROP', 'STOW', 'PULL', 'USE', 'LOOK', 'EXAMINE', 'DESCEND', 'ASCEND', 'SAVE', 'LOAD', 'PAUSE', 'QUIT', 'SLEEP', 'HELP', 'SOUND', 'MUSIC', 'SEED', 'ANIMATE', 'XXX'];
+const VERBS = ['MOVE', 'REVEAL', 'TURN', 'ATTACK', 'GET', 'DROP', 'STOW', 'PULL', 'USE', 'LOOK', 'EXAMINE', 'DESCEND', 'ASCEND', 'SAVE', 'LOAD', 'PAUSE', 'QUIT', 'SLEEP', 'HELP', 'SOUND', 'MUSIC', 'SEED', 'ANIMATE', 'INVENTORY', 'XXX'];
 // These commands must be typed in full, so a stray letter can't open the test map views, quit or use XXX.
 const FULL_WORD_ONLY = ['REVEAL', 'QUIT', 'XXX'];
 function matchWord(tok, list) { return list.find(w => FULL_WORD_ONLY.includes(w) ? w === tok : w.startsWith(tok)); }
@@ -792,7 +792,7 @@ function exec(line) {
     }
     case 'LOOK': G.view = 'main'; break;
     case 'REVEAL': G.view = 'full'; G.tested = true; break;
-    case 'EXAMINE': G.view = 'pack'; break;
+    case 'EXAMINE': case 'INVENTORY': G.view = 'pack'; break;
     case 'DESCEND': {
       const s = G.L.stairs;
       if (!s || s.x !== G.p.x || s.y !== G.p.y) { msg('THERE IS NO WAY DOWN HERE.'); return; }
@@ -1930,7 +1930,7 @@ const HELP_PAGE = [
     ['STOW L|R', 'PUT IT IN YOUR PACK'],
     ['PULL L|R ITEM|#', 'TAKE IT FROM YOUR PACK'],
     ['USE L|R  OR  USE ITEM', 'LIGHT, DRINK, READ'],
-    ['EXAMINE', 'SEE YOUR PACK'],
+    ['EXAMINE  /  INVENTORY', 'SEE YOUR PACK'],
   ]],
   ['GAME', [
     ['SAVE  /  LOAD', 'ONE SAVED GAME'],
