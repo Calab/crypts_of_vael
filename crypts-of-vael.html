@@ -56,7 +56,7 @@ const titleFont = px => Math.round(px * TITLE_FONT_SCALE) + 'px ' + TITLE_FONT;
 // Canvas text alone doesn't make the browser download a web font, so ask for both up front.
 // Until they arrive (or if the files are missing) the text falls back to Courier New.
 if (document.fonts) for (const f of ['16px "Foul Fiend"', '16px "Swinging Wake"']) document.fonts.load(f).catch(() => {});
-const VERSION = '1.1.1';               // shown in the lower right of the title page
+const VERSION = '1.1.2';               // shown in the lower right of the title page
 const W = 800, H = 500, VH = 440;   // logical drawing size; the canvas is scaled to fit the window
 let SCALE = 1;
 const MIN_W = 640;                    // smallest game width (640x400 drawing area + text = about 640x480)
@@ -1175,7 +1175,8 @@ function update(now) {
     }
     const sight = G.light ? 20 : 6;               // monsters see a lit player much farther down a hall
     const seesPlayer = dist > 0 && dist <= sight && lineOfSight(m);
-    const chase = seesPlayer || (dist > 0 && dist <= 14 + G.lvl * 2);
+    // passage-distance chase radius: 6 + depth (was 14 + 2 x depth, which drew most of the level onto you)
+    const chase = seesPlayer || (dist > 0 && dist <= 6 + G.lvl);
     const opts = [];
     for (let d = 0; d < 4; d++) {
       const nx = m.x + DX[d], ny = m.y + DY[d];
