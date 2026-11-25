@@ -42,6 +42,80 @@
 </div>
 <script>
 "use strict";
+// =====================================================================================================
+// HOW THIS FILE WORKS - an overview
+// =====================================================================================================
+// The whole game is this one file: the page layout and styles above, and all the code in this script.
+// Fonts are embedded in the <style> block; graphics are drawn with lines on a <canvas>; every sound and
+// note of music is synthesised with the browser's Web Audio API. Nothing else is loaded.
+//
+// THE PAGE
+//   <canvas id="cv">  the picture: the 3D corridor view (top 440 units) and the status bar (bottom 60).
+//   <div id="log">    the last six messages; older ones are dimmed.
+//   <input id="cmd">  where commands are typed. Pressing Enter sends the line to exec() (see "input").
+//   <span id="timer"> the time played, at the right end of the command line.
+//
+// THE MAIN LOOP
+//   The browser calls loop() about 60 times a second (requestAnimationFrame). Each frame it:
+//     1. tickTimer()  adds the frame's time to the play timer,
+//     2. update(now)  runs the world forward: heartbeat, light burning down, healing, every monster's
+//                     turn (wake, wander, chase, attack), background music,
+//     3. render(now)  clears the canvas and redraws everything from scratch.
+//   Typed commands are handled separately, the moment Enter is pressed (exec), and only change the state;
+//   the next frame shows the result. Nothing is "turn based": monsters act on their own timers.
+//
+// TIME
+//   All game times are milliseconds from gameNow() (the page clock plus clockSkew). Timers are stored as
+//   the clock time something may next happen (m.nextMove, G.atkReady, G.nextBeat...), so pausing has to
+//   push them all forward (resumeGame) and SLEEP skips time by moving clockSkew on.
+//
+// THE GRID AND DIRECTIONS
+//   A level is a square grid of S x S cells, stored row by row in a flat array: cell (x, y) is index
+//   y * S + x. x grows to the east, y grows to the SOUTH (down the map). Directions are numbers:
+//   0 = north, 1 = east, 2 = south, 3 = west, so (dir + 1) % 4 is a right turn, (dir + 3) % 4 a left
+//   turn and (dir + 2) % 4 about face. DX[dir], DY[dir] give the step for each direction.
+//
+// THE GAME STATE: G (null while the title screen is showing)
+//   seed           the maze seed; the same seed always builds the same five levels
+//   state          'play', 'won' or 'dead'
+//   lvl, L         the current depth (1-5) and its level object; levels[n] keeps every level visited
+//   p              the player: { x, y, dir }
+//   pdist          steps from the player to every cell along open passages (-1 = unreachable), rebuilt
+//                  by bfs() after every move. Monsters use it to chase, cries use it for loudness.
+//   hp, maxhp      health; fatigue and strain track how hard you have been walking (exert)
+//   hands[0], [1]  the item in the left and right hand (or null); pack = up to 8 more items
+//   light          the lit torch or lantern { name, range, rem = seconds left, max } or null
+//   view           what the screen shows: 'main' (corridor), 'pack', 'help', 'explored' (your map) or
+//                  'full' (the whole maze, a test view)
+//   xp, kills      experience points and monsters slain; rank and its bonuses come from xp
+//   anim, swing, strike   short animations in progress (moving/turning, your attack, a monster's blow)
+//   pending        a Y/N question waiting for an answer (quit, or start a new seed)
+//   paused, sleep, fainted   the three ways play can be suspended
+//   playMs         time played, for the timer and best times
+//
+// A LEVEL: L (built by buildLevel)
+//   n, S           its depth and size (21 + 2n cells across, always odd)
+//   g              the grid: 1 = wall, 0 = open floor
+//   seen           1 for every cell you have seen, for the MAP item
+//   items          things on the floor: { x, y, it } where `it` is an item made by makeItem
+//   mons           the monsters: a copy of their MON entry plus x, y, hp, maxHp and timers
+//                  (nextMove, nextAtk, nextCry), hurt (shakes until then), dormant (asleep),
+//                  carry (an item it drops on death), ph (animation phase) and lunge (attack animation)
+//   stairs, up     the ladders down and up, as { x, y } (null when there is none)
+//
+// THE 3D VIEW
+//   You only ever look straight down a corridor, so the view is a set of nested rectangles: R(z) is the
+//   outline of the corridor's cross-section z cells ahead, shrinking toward the centre of the screen as
+//   z grows (fz). renderMain walks forward cell by cell drawing the wall edges between those rectangles,
+//   then draws ladders, items and monsters from far to near so near things cover far ones.
+//   Items and monsters are lists of polygons (ICON and SHAPE) drawn by drawPolys.
+//
+// SECTIONS, in order: setup, audio, music, victory hymn, background music, monster voices, data,
+// maze, state, save/load, messages, commands, best times, simulation, sleeping, pausing, experience,
+// vector shapes, rendering, attack animation, monster strike animation, movement animation, maps and
+// panels, title-screen attract mode, play timer, input.
+// =====================================================================================================
+
 // ---------- setup ----------
 const cv = document.getElementById('cv'), ctx = cv.getContext('2d');
 // Fonts (in the fonts folder). Canvas text sizes were written with Courier New in mind, so each font
@@ -60,6 +134,8 @@ const VERSION = '1.1.2';               // shown in the lower right of the title 
 const W = 800, H = 500, VH = 440;   // logical drawing size; the canvas is scaled to fit the window
 let SCALE = 1;
 const MIN_W = 640;                    // smallest game width (640x400 drawing area + text = about 640x480)
+// Sizes the canvas and the text below it to fill the window while keeping the 800:500 shape. All drawing
+// is done in the 800x500 "logical" units; render() scales them by SCALE to the canvas's real pixels.
 function resize() {
   const wrap = document.getElementById('wrap'), below = document.getElementById('below');
   const setFont = w => document.documentElement.style.setProperty('--fs', Math.max(12, Math.min(22, w / 52)) + 'px');
@@ -82,16 +158,20 @@ function resize() {
   SCALE = cv.width / W;
 }
 window.addEventListener('resize', resize);
+// The centre of the corridor view, and half its width and height.
 const CX = W / 2, CY = VH / 2, HW = W / 2, HH = VH / 2;
+// One step in each direction (0 north, 1 east, 2 south, 3 west); y grows southward.
 const DX = [0, 1, 0, -1], DY = [-1, 0, 1, 0];
 const DIRN = ['NORTH', 'EAST', 'SOUTH', 'WEST'];
-const FG = [125, 255, 154];
+const FG = [125, 255, 154];             // the green used for most lines and text, as [red, green, blue]
 // Highlight colours shared by the 3D view and the overhead maps
 const RGB = { item: [255, 227, 77], mon: [255, 77, 77], ladder: [77, 232, 255], wall: [255, 255, 255] };
 // RNG is swapped for a seeded generator while a level is being built, so a seed always gives the same mazes.
 let RNG = Math.random;
 const rnd = (a, b) => a + Math.floor(RNG() * (b - a + 1));
 const pick = a => a[Math.floor(RNG() * a.length)];
+// A small, fast random number generator. Given the same starting number it always produces the same
+// sequence of numbers between 0 and 1, which is what makes a seed repeatable.
 function mulberry32(a) {
   return function () {
     a |= 0; a = a + 0x6D2B79F5 | 0;
@@ -100,6 +180,8 @@ function mulberry32(a) {
     return ((t ^ t >>> 14) >>> 0) / 4294967296;
   };
 }
+// Turns what the player typed into a seed number: blank picks a random one, digits are used as they are,
+// and any other text (a word or name) is hashed into a number, so "VAEL" is always the same maze.
 function parseSeed(str) {
   str = (str || '').trim();
   if (!str) return 100000 + Math.floor(Math.random() * 900000);
@@ -108,8 +190,12 @@ function parseSeed(str) {
   for (const ch of str.toUpperCase()) { h ^= ch.charCodeAt(0); h = Math.imul(h, 16777619); }
   return h >>> 0;
 }
+// Perspective. fz(z) is how much smaller things look z cells ahead: 1 at your feet, 0.54 one cell away,
+// 0.37 two cells away, and so on. R(z) is the rectangle the corridor's walls, floor and ceiling make at
+// that depth: left, right, top and bottom screen edges, plus the scale k. At z = 0 it fills the view.
 const fz = z => 1 / (1 + 0.85 * z);
 function R(z) { const k = fz(z); return { l: CX - HW * k, r: CX + HW * k, t: CY - HH * k, b: CY + HH * k, k }; }
+// A colour string for the canvas: colour c (green by default) at opacity a (0 = invisible, 1 = solid).
 function col(a, c = FG) { return `rgba(${c[0]},${c[1]},${c[2]},${a})`; }
 
 // ---------- audio ----------
@@ -137,17 +223,23 @@ function saveVolumes() {
 }
 const musicGainFor = v => Math.max(0, v) / 9 * 1.5;
 const sfxGainFor = v => Math.max(0, v) / 6;      // 6 = unchanged, 9 = 1.5x
+// Every sound effect (and the tunes) runs through one shared volume control, the "sfx bus", so the
+// SOUND command can turn them all up or down at once. Background music has its own bus (musicBus).
 let sfxGain = null;
 function sfxBus(a) {
   if (!sfxGain) { sfxGain = a.createGain(); sfxGain.gain.value = sfxGainFor(soundVol); sfxGain.connect(a.destination); }
   return sfxGain;
 }
 function setSoundVol(v) { soundVol = v; if (AC && sfxGain) sfxGain.gain.setTargetAtTime(sfxGainFor(v), AC.currentTime, 0.05); }
+// The browser's audio engine, created the first time a sound is needed (after the player's first key press).
 function ac() {
   if (!AC) { try { AC = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) { AC = null; } }
   if (AC && AC.state === 'suspended') AC.resume().catch(() => {});   // browsers pause audio until the player interacts
   return AC;
 }
+// The building block of the simple sound effects: one beep of `freq` hertz lasting `dur` seconds that
+// fades out. `type` is the wave shape (sine is soft, square and sawtooth are buzzy); `slide` bends the
+// pitch toward freq x slide by the end; `delay` starts it that many seconds later.
 function tone(freq, dur, type = 'sine', vol = 0.2, slide = 0, delay = 0) {
   if (simulating || soundVol <= 0) return; const a = ac(); if (!a) return;
   const t0 = a.currentTime + delay, o = a.createOscillator(), g = a.createGain();
@@ -161,6 +253,8 @@ function tone(freq, dur, type = 'sine', vol = 0.2, slide = 0, delay = 0) {
 const midiHz = m => 440 * Math.pow(2, (m - 69) / 12);
 let musicNodes = [];
 function stopMusic() { for (const o of musicNodes) { try { o.stop(); } catch (e) { /* already stopped */ } } musicNodes = []; }
+// Plays a short tune (the death lament). Every note is scheduled up front on the audio clock, so the
+// tune plays smoothly whatever the game is doing; stopMusic() cuts it off.
 function playTune(voices, bpm) {
   stopMusic();
   if (simulating || soundVol <= 0) return;
@@ -294,12 +388,15 @@ function musicNote(a, midi, dur, type, vol, t) {
   g.gain.exponentialRampToValueAtTime(0.0001, t + Math.max(0.05, dur));
   o.connect(g).connect(musicBus(a)); o.start(t); o.stop(t + dur + 0.05);
 }
+// True while fighting: struck in the last 4 seconds, or an awake monster within 2 steps.
 function inCombat() {
   if (!G || G.state !== 'play') return false;
   if (gameNow() - G.lastStruck < 4000) return true;
   const S = G.L.S, pd = G.pdist;
   return G.L.mons.some(m => !m.dormant && pd[m.y * S + m.x] <= 2);
 }
+// Called every frame. Keeps a quarter of a second of music queued ahead of the audio clock, one step of
+// the current pattern at a time, and switches between the explore and combat loops as needed.
 function musicTick() {
   if (musicVol <= 0 || !G || G.state !== 'play' || G.pending) { musicState = null; return; }
   const a = ac(); if (!a || a.state !== 'running') return;
@@ -325,6 +422,9 @@ function fadeMusicOut() { if (AC && musicGain) musicGain.gain.setTargetAtTime(0.
 // and the sound is panned left/right according to where the monster is relative to the way you face.
 const HEAR_RANGE = 17;   // furthest a cry carries, in steps along the maze paths
 const CRY_GAIN = { mould: 1.5, crawler: 2, hound: 2.1, skeleton: 1.6, wraith: 1, golem: 0.75, king: 2.3 };   // evens out loudness
+// Helpers for the cries: one second of random hiss (noise), shared by every sound that needs it; env() a
+// volume envelope (quick rise to `peak`, fade out over `dur`); vOsc() a tone and vNoise() a filtered hiss,
+// both started at time t and sent to `out`.
 let NOISE = null;
 function noiseBuf(a) {
   if (!NOISE) {
@@ -410,6 +510,7 @@ function cryPan(m) {
   const right = dx * DX[(d + 1) % 4] + dy * DY[(d + 1) % 4], fwd = dx * DX[d] + dy * DY[d];
   return Math.max(-1, Math.min(1, right / (Math.abs(right) + Math.abs(fwd) + 0.5)));
 }
+// Plays monster m's cry at loudness `level` (0..1), panned toward where it is.
 function monsterCry(m, level) {
   if (simulating || soundVol <= 0 || level <= 0) return;
   const a = ac(); if (!a) return;
@@ -418,6 +519,7 @@ function monsterCry(m, level) {
   else out.connect(sfxBus(a));
   CRIES[m.k](a, out, a.currentTime + 0.02);
 }
+// The game's short sound effects, each made of one or two tones. beat = the two-part heartbeat.
 const SFX = {
   beat(gap = 0.14) { tone(70, 0.11, 'sine', 0.45, 0.6); tone(55, 0.11, 'sine', 0.35, 0.6, gap); },
   swing() { tone(900, 0.09, 'triangle', 0.08, 0.3); },
@@ -431,6 +533,11 @@ const SFX = {
 };
 
 // ---------- data ----------
+// Every kind of item. The fields used depend on the type:
+//   weapon: dmg = [least, most] damage, hit = chance to hit (0..1), cd = milliseconds before that arm can
+//           strike again;  shield: block = share of a blow from the front it stops;
+//   light: range = cells you can see, dur = seconds it burns;  potion: heal = health restored, max =
+//   added to your maximum health;  treasure: xp gained by using it;  goal: picking it up wins the game.
 const ITEMS = {
   dagger:   { name: 'DAGGER', type: 'weapon', dmg: [3, 7], hit: 0.92, cd: 600 },
   axe:      { name: 'HAND AXE', type: 'weapon', dmg: [5, 10], hit: 0.86, cd: 700 },
@@ -448,6 +555,9 @@ const ITEMS = {
   relic:    { name: 'GOLDEN RELIC', type: 'treasure', xp: 15 },
   crown:    { name: 'EMBER CROWN', type: 'goal' },
 };
+// Every kind of monster. hp = health on depth 1 (more on deeper levels, see hpScale); dmg = [least, most]
+// damage per blow; atk = milliseconds between blows; move = milliseconds between moves (lower is faster);
+// hit = chance a blow lands; cry = roughly how often it calls out; sound = what "YOU HEAR ..." says.
 const MON = {   // listed weakest to strongest (seed 0 shows them in this order)
   mould:   { name: 'SLIME MOULD', hp: 8, dmg: [1, 3], atk: 2200, move: 1900, hit: 0.6, cry: 1600, sound: 'A WET SQUELCH' },
   crawler: { name: 'GLOOMCRAWLER', hp: 16, dmg: [2, 5], atk: 1700, move: 950, hit: 0.7, cry: 1300, sound: 'SKITTERING' },
@@ -457,6 +567,8 @@ const MON = {   // listed weakest to strongest (seed 0 shows them in this order)
   golem:   { name: 'IRON GOLEM', hp: 80, dmg: [8, 15], atk: 2200, move: 1600, hit: 0.75, cry: 1500, sound: 'GRINDING IRON' },
   king:    { name: 'HOLLOW KING', hp: 210, dmg: [10, 18], atk: 1600, move: 1000, hit: 0.8, cry: 2400, sound: 'A COLD LAUGH' },
 };
+// What each depth (1 to 5) contains: how many of each monster, the items always placed there, and on the
+// last level the boss, who waits on the cell farthest from the entrance.
 const LEVELS = [
   { mons: { mould: 4, crawler: 4, skeleton: 2 }, items: ['axe', 'buckler', 'torch', 'torch', 'mending', 'relic'] },
   { mons: { mould: 2, crawler: 3, skeleton: 3, hound: 2 }, items: ['sword', 'torch', 'lantern', 'mending', 'vigor', 'relic'] },
@@ -476,6 +588,11 @@ const aName = it => (/^[AEIOU]/.test(it.name) ? 'AN ' : 'A ') + it.name;   // "A
 function makeItem(kind, extra) { return Object.assign({ kind }, ITEMS[kind], extra || {}); }
 
 // ---------- maze ----------
+// Builds a random maze S x S cells across (1 = wall, 0 = floor) by "recursive backtracking": start at
+// the top-left corner and keep knocking through to a random unvisited cell two steps away; at a dead end,
+// back up until there is a way on. That makes a perfect maze (exactly one route between any two cells).
+// Then about 6% of the remaining single wall blocks between two passages are knocked out, which adds
+// loops so there is more than one way around and you can't always be cornered.
 function carve(S) {
   const g = new Uint8Array(S * S).fill(1);
   const st = [[1, 1]]; g[S + 1] = 0;
@@ -500,6 +617,9 @@ function carve(S) {
   }
   return g;
 }
+// "Breadth-first search": the number of steps from (sx, sy) to every cell of level L along open
+// passages, -1 for walls. It spreads outward one step at a time, like a ripple, so each cell is reached
+// by its shortest route first.
 function bfs(L, sx, sy) {
   const S = L.S, dist = new Int16Array(S * S).fill(-1), q = [sx + sy * S];
   dist[q[0]] = 0;
@@ -512,11 +632,17 @@ function bfs(L, sx, sy) {
   }
   return dist;
 }
+// Builds level n with a random number generator seeded from the game seed and the level number, so each
+// level of a seed always comes out the same however you got there. Randomness during play is not seeded.
 function makeLevel(n) {
   const prev = RNG;
   RNG = mulberry32((G.seed ^ Math.imul(n, 0x9E3779B1)) >>> 0);
   try { return buildLevel(n); } finally { RNG = prev; }
 }
+// Lays out one level: carves the maze, puts the up-ladder at the entrance (1, 1) and the down-ladder on
+// the cell farthest from it, then scatters the level's items (at least 3 steps from the entrance), extra
+// random items (at least 2) and monsters (at least 8, so none start right on top of you). `used` stops
+// two things being placed in the same cell. About a third of the monsters are given an item to carry.
 function buildLevel(n) {
   const S = 21 + n * 2, L = { n, S, g: carve(S), items: [], mons: [], stairs: null, up: n > 1 ? { x: 1, y: 1 } : null, seen: new Uint8Array(S * S) };
   const dist = bfs(L, 1, 1);
@@ -563,6 +689,8 @@ function buildLevel(n) {
   for (const m of L.mons) if (m.k !== 'king' && RNG() < LOOT_CHANCE) m.carry = makeItem(pick(LOOT));
   return L;
 }
+// Questions about the current level: is this cell solid (outside the grid counts as wall), which
+// monster stands here, and what items lie here.
 const isWall = (x, y) => x < 0 || y < 0 || x >= G.L.S || y >= G.L.S || G.L.g[y * G.L.S + x] === 1;
 const monAt = (x, y) => G.L.mons.find(m => m.x === x && m.y === y);
 const itemsAt = (x, y) => G.L.items.filter(o => o.x === x && o.y === y);
@@ -570,6 +698,8 @@ const itemsAt = (x, y) => G.L.items.filter(o => o.x === x && o.y === y);
 // ---------- state ----------
 let G;
 let lastSeed = null;
+// Starts a fresh game on `seed`: a new G with full health, a torch and a map in the pack and a dagger on
+// the floor at your feet, then the opening messages.
 function newGame(seed) {
   stopMusic(); musicState = null;
   lastSeed = seed;
@@ -585,6 +715,8 @@ function newGame(seed) {
   msg('MAZE SEED: ' + seed + '   (ENTER THIS SEED TO PLAY THE SAME MAZE)');
   if (seed === 0) msg('TEST MAZE: ONE OF EVERY MONSTER SLEEPS ALONG THE PATH AHEAD. STRIKE ONE TO WAKE IT.');
 }
+// Moves you onto depth n (building it the first time), standing at the up-ladder, or at the down-ladder
+// when climbing up (entry 'stairs'), and facing the first open passage.
 function enterLevel(n, entry) {
   G.lvl = n;
   if (!G.levels[n]) G.levels[n] = makeLevel(n);   // build once, then keep its state between visits
@@ -601,6 +733,8 @@ function enterLevel(n, entry) {
 // The whole game (all visited levels, your inventory, rank, position) is stored in the browser's
 // localStorage, which holds far more than a cookie could. One save slot.
 const SAVE_KEY = 'vael-save';
+// The game is saved as JSON text, which can't hold the compact number arrays used for the maze grids.
+// These two convert them to plain lists on the way out and back again on the way in.
 function typedReplacer(key, val) {
   if (val instanceof Uint8Array) return { __t: 'u8', d: Array.from(val) };
   if (val instanceof Int16Array) return { __t: 'i16', d: Array.from(val) };
@@ -622,6 +756,8 @@ function saveGame() {
     msg('GAME SAVED. (TYPE LOAD TO RESUME IT LATER.)');
   } catch (e) { msg('COULD NOT SAVE - BROWSER STORAGE IS BLOCKED.'); }
 }
+// Restores the saved game. All timers restart from now, and older saves are brought up to date (a
+// monster that was later replaced, items that were renamed).
 function loadGame() {
   let raw; try { raw = localStorage.getItem(SAVE_KEY); } catch (e) { raw = null; }
   if (!raw) { msg('NO SAVED GAME FOUND.'); return false; }
@@ -648,6 +784,8 @@ function loadGame() {
 // ---------- messages ----------
 const logEl = document.getElementById('log');
 let logLines = [];
+// Adds a line to the message log (the last six are kept). During SLEEP the lines are held in simLog
+// instead, so a few can be shown on waking.
 function msg(s) { if (simulating) { simLog.push(s); return; } logLines.push(s); if (logLines.length > 6) logLines.shift(); drawLog(); }
 function logClear() { logLines = []; drawLog(); }
 function drawLog() {
@@ -665,21 +803,29 @@ function drawLog() {
 
 // ---------- commands ----------
 const HELP_SEP = '  •  ';   // bullet between items in a list, e.g. the end-of-game numbers
+// Every command word. A typed word matches the first one in this list that it is the start of, so the
+// order decides abbreviations: M = MOVE (before MUSIC), T = TURN, A = ATTACK, S = STOW...
 const VERBS = ['MOVE', 'REVEAL', 'TURN', 'ATTACK', 'GET', 'DROP', 'STOW', 'PULL', 'USE', 'LOOK', 'EXAMINE', 'DESCEND', 'ASCEND', 'SAVE', 'LOAD', 'PAUSE', 'QUIT', 'SLEEP', 'HELP', 'SOUND', 'MUSIC', 'SEED', 'ANIMATE', 'INVENTORY', 'XXX'];
 // These commands must be typed in full, so a stray letter can't open the test map views, quit or use XXX.
 const FULL_WORD_ONLY = ['REVEAL', 'QUIT', 'XXX'];
 function matchWord(tok, list) { return list.find(w => FULL_WORD_ONLY.includes(w) ? w === tok : w.startsWith(tok)); }
+// LEFT (or L, LE...) = hand 0, RIGHT = hand 1, anything else = -1.
 function handArg(tok) {
   if (!tok) return -1;
   if ('LEFT'.startsWith(tok)) return 0;
   if ('RIGHT'.startsWith(tok)) return 1;
   return -1;
 }
+// Does item `it` fit the words typed after a command? Each word must start one word of the item's name
+// (or its kind), so GET R SW, GET R SHORT and GET R SWORD all find the SHORT SWORD. No words match anything.
 function itemMatches(it, words) {
   if (!words.length) return true;
   const names = it.name.split(' ').concat([it.kind.toUpperCase()]);
   return words.every(w => names.some(n => n.startsWith(w)));
 }
+// Carries out one typed command during play. The line is split into upper-case words (t[0] the command,
+// t[1] usually LEFT/RIGHT, the rest an item name). First come the states that take over the input
+// (paused, fainted, asleep, a Y/N question, a new seed), then one case per command word.
 function exec(line) {
   const t = line.trim().toUpperCase().split(/\s+/).filter(Boolean);
   if (!t.length) return;
@@ -862,6 +1008,8 @@ function exec(line) {
 }
 // Overhead test views (explored / full) stay open while moving or fighting; other views close.
 function mapSafeView() { if (G.view !== 'explored' && G.view !== 'full') G.view = 'main'; }
+// Records the cells you can see right now for the MAP: straight ahead as far as your light reaches (or a
+// wall), plus the cells to either side of each, where side passages open. Called every frame.
 function markSeen() {
   const L = G.L, S = L.S, p = G.p, fd = p.dir, range = lightRange();
   const mark = (x, y) => { if (x >= 0 && y >= 0 && x < S && y < S) L.seen[y * S + x] = 1; };
@@ -872,6 +1020,9 @@ function markSeen() {
     for (const sd of [(fd + 1) % 4, (fd + 3) % 4]) mark(x + DX[sd], y + DY[sd]);
   }
 }
+// Takes one step in direction d (you keep facing the same way, so MOVE LEFT is a sidestep). A wall
+// hurts; otherwise the step tires you (exert), starts the glide animation, recalculates every cell's
+// distance from you (pdist) and reports what is here.
 function move(d) {
   const nx = G.p.x + DX[d], ny = G.p.y + DY[d];
   if (isWall(nx, ny)) {
@@ -952,6 +1103,9 @@ function use(h) {
   applyUse(it, () => { G.hands[h] = null; });
 }
 function usePack(i) { applyUse(G.pack[i], () => { G.pack.splice(i, 1); }); }
+// Strikes with hand h (0 left, 1 right). Each hand has its own recovery time, so you can alternate
+// hands to strike more often. The target is a monster in your cell, else the one just ahead. A bare
+// fist does 1-3 and a shield 2-5; a weapon uses its own numbers. Your rank adds to every hit.
 function attack(h) {
   const now = gameNow();
   if (now < G.atkReady[h]) { msg('YOUR ARM IS NOT READY.'); return; }
@@ -980,6 +1134,8 @@ const DEATH = {
   golem: 'TUMBLES DOWN WITH A CRASH!',
   king: 'COLLAPSES INTO EMPTY ROBES!',
 };
+// A monster dies: it is removed, you gain XP and 4 maximum health (up to 250), and it drops what it carried.
+// The Hollow King leaves the Ember Crown behind.
 function killMonster(m) {
   G.L.mons.splice(G.L.mons.indexOf(m), 1); SFX.kill(); G.kills++;
   msg('THE ' + m.name + ' ' + (DEATH[m.k] || 'FALLS AND IS GONE!'));
@@ -1018,6 +1174,8 @@ function loadBest() {
   } catch (e) { /* storage blocked or corrupt */ }
   return (bestMemo = { best: null, seeds: {} });
 }
+// Called on a win: compares the time with the stored bests and saves any new record. Returns what the
+// end screen should say.
 function recordWin() {
   const ms = G.playMs || 0, r = { ms };
   if (G.seed === 0) { r.unrecorded = 'PLAYED ON THE TEST MAZE'; return r; }
@@ -1038,6 +1196,8 @@ function win() { G.state = 'won'; G.view = 'main'; G.result = recordWin(); fadeM
 function die(why, cause) { G.state = 'dead'; G.hp = 0; G.view = 'main'; G.cause = (cause || 'YOU PERISHED') + ' ON DEPTH ' + G.lvl; G.result = { seedBest: loadBest().seeds[G.seed] }; fadeMusicOut(); TUNES.death(); if (why) msg(why); msg('YOUR HEART FALLS SILENT. YOU HAVE PERISHED.'); msg('TYPE RESTART AND PRESS ENTER TO RETURN TO THE TITLE.'); }
 
 // ---------- simulation ----------
+// How many cells ahead you can see: 1 without a light, otherwise the light's range, shrinking over its
+// last 45 seconds as it gutters.
 function lightRange() {
   if (!G.light) return 1;
   return Math.max(1, Math.ceil(G.light.range * Math.min(1, G.light.rem / 45)));
@@ -1124,6 +1284,19 @@ document.addEventListener('visibilitychange', () => {
   else if (G.paused && G.autoPaused) { resumeGame(); msg('WELCOME BACK. GAME RESUMED.'); }
 });
 let lastT = 0;
+// Runs the world forward to time `now`; called every frame (and many times in a row during SLEEP).
+// dt is the time since the last call, capped at 0.1 s so a stalled frame can't cause a big jump.
+// In order: the heartbeat (faster when hurt or tired), fatigue easing off, the light burning down,
+// healing while you rest, and then each monster's turn:
+//   - every monster cries out now and then, louder the closer it is along the passages;
+//   - a sleeping monster wakes only when you come within one step;
+//   - otherwise it waits for its next move time (its speed, varied by up to 20% either way). Then:
+//       * beside you: it steps into your cell if that is free, else it attacks when its arm is ready;
+//       * it chases if it can see you straight down a hall (20 cells with a light, 6 without), or you
+//         are within 6 + depth steps along the passages. A chaser only takes steps that bring it
+//         closer (using pdist);
+//       * a monster that isn't chasing wanders to a random open neighbour on 60% of its turns.
+//     Monsters never share a cell with each other, so in a corridor they queue up behind one another.
 function update(now) {
   const dt = Math.max(0, Math.min(100, now - (lastT || now))); lastT = now;
   if (G.state !== 'play' || G.pending) return;   // paused while asking about a new seed
@@ -1193,6 +1366,9 @@ function update(now) {
     }
   }
 }
+// Monster m strikes at you. In turn: it may miss (its hit chance), you may dodge (your rank), and a
+// shield in either hand stops part of a blow from in front. Blows from the side or behind are reported
+// as SOMETHING, since you can't see what hit you.
 function monsterAttack(m) {
   monsterCry(m, 1);                                  // full-volume cry as it attacks
   m.nextCry = gameNow() + m.cry;
@@ -1231,17 +1407,26 @@ function lineOfSight(m) {
   while (x !== G.p.x || y !== G.p.y) { if (isWall(x, y)) return false; x += dx; y += dy; }
   return true;
 }
+// Which direction (0-3) monster m is in from you, roughly; used to say which side a blow came from.
 function dirTo(m) {
   const dx = m.x - G.p.x, dy = m.y - G.p.y;
   if (dy < 0) return 0; if (dx > 0) return 1; if (dy > 0) return 2; return 3;
 }
 
 // ---------- vector shapes ----------
+// Items (ICON) and monsters (SHAPE) are drawn as lists of polygons. Each polygon is a list of [x, y]
+// points in the shape's own units: x = 0 is the middle, y = 0 is the floor and y grows UPWARD (drawPolys
+// flips it for the screen). A monster is up to about 1.6 units tall; an item under 1. Most shape functions take
+// the time t, so they can breathe, flicker or sway. Helpers: ell() makes an ellipse (or part of one),
+// mir() mirrors a polygon left-to-right, box() makes a rectangle.
 function ell(cx, cy, rx, ry, n = 18, a0 = 0, a1 = Math.PI * 2) {
   const p = []; for (let i = 0; i <= n; i++) { const a = a0 + (a1 - a0) * i / n; p.push([cx + Math.cos(a) * rx, cy + Math.sin(a) * ry]); } return p;
 }
 const mir = poly => poly.map(([x, y]) => [-x, y]);
 const box = (x0, y0, x1, y1) => [[x0, y0], [x1, y0], [x1, y1], [x0, y1], [x0, y0]];
+// Draws a shape's polygons with its floor-centre at screen point (ox, oy), `s` screen units per shape
+// unit, in colour rgb at opacity a. Closed polygons are filled black first, so a near monster hides the
+// corridor lines behind it.
 function drawPolys(polys, ox, oy, s, a, fill = true, rgb = FG) {
   ctx.strokeStyle = col(a, rgb); ctx.fillStyle = '#000';
   for (const p of polys) {
@@ -1587,12 +1772,23 @@ function HERO(t) {
 
 // ---------- rendering ----------
 function line(x0, y0, x1, y1) { ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); ctx.stroke(); }
+// How bright something d cells away is drawn: fading with distance and flickering slightly with a light;
+// very dim without one.
 function bright(d, range) {
   if (!G.light) return d === 0 ? 0.5 : 0.22;
   return Math.max(0.15, 1 - d / (range + 1.5)) * (0.92 + 0.08 * Math.random());
 }
 // Draws the corridor as seen from position P. `shift` (between -1 and 0) pulls every depth closer,
 // which is how the forward/back glide animation is drawn. Anything that ends up behind the eye is clipped.
+// How it works:
+//   1. List the open cells straight ahead, out to the light's range or the first wall.
+//   2. For each cell, take the rectangle at its near edge (n = R(d)) and far edge (f = R(d + 1)).
+//      On each side: if there is wall beside the cell, join the two rectangles' corners (the wall's top
+//      and bottom edges, in perspective) and draw its far upright; if there is a side passage, draw only
+//      the uprights of the opening, plus the edges of the wall facing you across the side passage.
+//   3. If a wall ends the corridor within range, draw it as the far rectangle.
+//   4. From the farthest cell to the nearest: ladders, items on the floor, the monster in the cell, and
+//      any monster standing in a side opening (clipped to the doorway so only its edge peeks out).
 function renderMain(now, P = G.p, shift = 0) {
   const p = P, fd = p.dir, ld = (fd + 3) % 4, rd = (fd + 1) % 4, fx = DX[fd], fy = DY[fd];
   const baseRange = lightRange();
@@ -1793,6 +1989,8 @@ function renderOverlay(now) {
 let animOn = true;
 try { animOn = localStorage.getItem('vael-animate') !== 'off'; } catch (e) { /* storage unavailable */ }
 const MOVE_MS = 140, TURN_MS = 170;
+// Draws the corridor, animated if a step or turn is in progress. A step glides the view forward or back
+// (renderMain's `shift`); a turn slides the old view off one side while the new one slides in.
 function renderView(now) {
   const a = G.anim;
   const t = a && animOn ? (now - a.t0) / a.dur : 1;
@@ -1992,6 +2190,7 @@ function renderPack() {
   ctx.fillText('RANK ' + xpRank() + ' (XP ' + G.xp + ')   DMG +' + strikeBonus() + '   DODGE ' + Math.round(evasion() * 100) + '%   SEED ' + G.seed, 60, 390);
   ctx.fillText('TYPE LOOK TO RETURN', 60, 418);
 }
+// The heart on the status bar, drawn from the classic heart-curve formula; it swells with each beat.
 function heart(x, y, s, a) {
   const P = [];
   for (let i = 0; i <= 32; i++) {
@@ -2000,6 +2199,7 @@ function heart(x, y, s, a) {
   }
   ctx.lineWidth = 2; drawPolys([P], x, y, s, a, false, RGB.mon);
 }
+// The status bar under the view: both hands, health and heart, depth and tiredness, rank, XP and seed.
 function renderStatus(now) {
   ctx.strokeStyle = col(0.4); ctx.lineWidth = 1; line(0, VH + 0.5, W, VH + 0.5);
   ctx.font = gameFont(18); ctx.fillStyle = col(1);
@@ -2073,6 +2273,7 @@ function renderDemo(now) {
   } finally { G = saved; animOn = savedAnim; }
   ctx.fillStyle = 'rgba(0,0,0,0.55)'; ctx.fillRect(0, 0, W, H);   // dim it so the title stays readable
 }
+// The title screen: the dimmed demo maze behind, the title, the instructions, best times and the hero.
 function renderTitle(now) {
   renderDemo(now);
   ctx.textAlign = 'center'; ctx.fillStyle = col(1, RGB.item);
@@ -2103,6 +2304,9 @@ function renderTitle(now) {
   ctx.fillText('V' + VERSION, W - 10, H - 10);
   ctx.textAlign = 'left'; ctx.fillText('F11 = FULLSCREEN', 10, H - 10);
 }
+// Draws one whole frame. Without a game, the title screen. Otherwise the top area shows whatever G.view
+// says (corridor, map, pack or help), with on top of it: the flash when hurt, a Y/N question, PAUSED,
+// the end-of-game panel; then the status bar, and the fade to black while asleep.
 function render(now) {
   ctx.setTransform(SCALE, 0, 0, SCALE, 0, 0);
   ctx.fillStyle = '#000'; ctx.fillRect(0, 0, W, H);
@@ -2148,11 +2352,20 @@ function tickTimer(t) {
   const txt = G ? fmtTime(G.playMs || 0) : '';
   if (timerEl.textContent !== txt) timerEl.textContent = txt;
 }
+// The main loop (see the overview at the top): the browser calls it before every screen refresh, with
+// the time t in milliseconds. It advances the timer and the world, draws the frame and asks to be called
+// again. The two lines after it start the whole game running.
 function loop(t) { const now = t + clockSkew; tickTimer(t); if (G) update(now); render(now); requestAnimationFrame(loop); }
 resize();
 requestAnimationFrame(loop);
 
 // ---------- input ----------
+// Everything typed goes into the command box. Clicking anywhere puts the cursor back in it, and a seed
+// in the page address (crypts-of-vael.html?seed=1234) is filled in ready to play. On each key press:
+//   - during play, SHIFT+F3 toggles the full-maze test view and ESC returns to the corridor;
+//   - on the title screen, Enter starts a game on the typed seed (or LOAD resumes the saved one);
+//   - once the game is over, only RESTART (or QUIT) goes back to the title;
+//   - otherwise Enter runs the line through exec(). An empty line repeats the last command.
 const cmd = document.getElementById('cmd');
 cmd.placeholder = 'SEED (BLANK = RANDOM)';
 const urlSeed = new URLSearchParams(location.search).get('seed');
